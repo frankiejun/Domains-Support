@@ -7,29 +7,25 @@
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
-    "pages:dev": "wrangler pages dev --compatibility-date=2024-01-01 --d1=DB -- npm run dev",
-    "db:create": "wrangler d1 create domains-db",
-    "db:execute": "wrangler d1 execute domains-db --file=./schema.sql",
-    "db:local": "wrangler d1 execute domains-db --local --file=./schema.sql",
-    "deploy": "npm run build && wrangler pages deploy dist --branch production",
-    "deploy:full": "npm run build && npm run db:execute && wrangler pages deploy dist --branch production",
-    "dev:local": "npm run db:local && npm run pages:dev"
+    "start": "node server/index.js",
+    "dev:server": "node server/index.js"
   },
   "dependencies": {
     "axios": "^1.8.4",
     "element-plus": "^2.9.7",
+    "express": "^4.21.2",
+    "multer": "^2.0.0",
+    "sql.js": "^1.11.0",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250408.0",
     "@element-plus/icons-vue": "^2.3.1",
     "@types/node": "^22.14.0",
     "@vitejs/plugin-vue": "^5.2.1",
     "@vue/tsconfig": "^0.7.0",
     "typescript": "~5.7.2",
     "vite": "^6.2.0",
-    "vue-tsc": "^2.2.4",
-    "wrangler": "^4.9.0"
+    "vue-tsc": "^2.2.4"
   }
 }

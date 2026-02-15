@@ -118,8 +118,8 @@ const defaultForm: DomainForm = {
     expiry_date: '',
     service_type: '伪装网站',
     status: '在线',
-    tgsend: 0,
-    st_tgsend: 1,
+    tgsend: 1,
+    st_tgsend: 0,
     memo: ''
 }
 

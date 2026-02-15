@@ -31,8 +31,7 @@
     "src/**/*.ts",
     "src/**/*.d.ts",
     "src/**/*.tsx",
-    "src/**/*.vue",
-    "functions/**/*.ts"
+    "src/**/*.vue"
   ],
   "references": [
     {

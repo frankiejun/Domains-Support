@@ -8,7 +8,7 @@
 
 
 
-一个基于 Cloudflare Pages 的域名管理系统，帮助您轻松管理和监控多个域名的状态、到期时间等信息。需配合serv00或者[DScheck](https://github.com/frankiejun/DScheck)使用.
+一个基于 Node.js + SQLite 的域名管理系统，帮助您轻松管理和监控多个域名的状态、到期时间等信息。需配合serv00或者[DScheck](https://github.com/frankiejun/DScheck)使用.
 
 ## 视频教学  
 [Domains-Support 配合SERV00/hostUNO，堪称养域名神器！](https://youtu.be/gPJ7tjRKnzo?si=X7zD4eiW7AyeXshQ)
@@ -69,50 +69,37 @@
 
 ### 前置要求
 
-- GitHub 账号
-- Cloudflare 账号
+- Node.js 18+ 环境
 
 ### 安装步骤
 
-1. Fork 本仓库到您的 GitHub 账号
+1. 克隆仓库并安装依赖
+   ```
+   git clone <your-repo-url>
+   cd domains-support
+   npm install
+   ```
 
-2. 在 Cloudflare Pages 中创建新项目
-   - 登录 Cloudflare Dashboard
-   - 进入 Pages 页面
-   - 点击 "Create a project"
-   - 选择 "Connect to Git"
-   - 选择您 fork 的仓库
+2. 构建前端
+   ```
+   npm run build
+   ```
 
-3. 配置构建设置
-   - 构建命令：`npm run build`
-   - 构建输出目录：`dist`
-   - 环境变量：
-     ```
-     USER=your_username
-     PASS=your_password
-     API_TOKEN=your_api_token
-     ```
+3. 配置环境变量
+   ```
+   USER=your_username
+   PASS=your_password
+   API_TOKEN=your_api_token
+   PORT=3000
+   DB_PATH=/path/to/domains.sqlite
+   ```
 
-4. 创建 D1 数据库
-   - 在 Cloudflare Dashboard 中进入 D1 页面
-   - 创建新数据库，命名为 `domains-db`
-   - 复制数据库 ID
+4. 启动服务
+   ```
+   npm run start
+   ```
 
-5. 配置数据库
-   - 在 Cloudflare Pages 项目设置中添加 D1 数据库绑定
-   - 绑定名称：`DB`
-   - 数据库 ID：粘贴之前复制的 ID
-
-6. 初始化数据库
-   - 在 Cloudflare Dashboard 中进入 D1 页面
-   - 选择您的数据库
-   - 执行 `schema.sql` 中的 SQL 语句
-
-7. 部署
-   - 点击 "Save and Deploy"
-   - 等待部署完成
-
-部署完成后，您可以通过 Cloudflare Pages 提供的域名访问系统。
+默认会在 `data/domains.sqlite` 创建数据库文件，`PORT` 默认为 3000。
 
 ## API 文档
 
@@ -120,7 +107,7 @@
 
 **端点**: `/api/check`
 **方法**: POST
-**认证**: 需要 API Token（通过 Bearer Token）
+**认证**: 需要 API Token（通过 Bearer Token 或查询参数）
 
 **请求体 (JSON)**:
 当使用 `POST` 方法时，请求体必须为 JSON 格式，包含一个 `domains` 数组。
@@ -159,11 +146,11 @@
 ```
 **注意**: 离线和过期通知现在会进行汇总，以减少子请求数量。通知详情将通过 Telegram 或微信发送。
 
-### 2. 域名列表 API
+### 2. 域名新增 API
 
 **端点**: `/api/addrec`
 **方法**: POST
-**认证**: 需要 Bearer Token
+**认证**: 需要 API Token
 
 响应：
 ```json
@@ -196,7 +183,7 @@
 
 ## 调度器
 
-由于pages项目无法自我定时唤醒，需要配合[DScheck](https://github.com/frankiejun/DScheck)项目一同使用。
+建议使用系统的定时任务或 [DScheck](https://github.com/frankiejun/DScheck) 定期调用 `/api/check`。
 
 ## 贡献指南
 
@@ -215,5 +202,4 @@
 ## 作者
 
 饭奇骏 ([@frankiejun](https://github.com/frankiejun))
-
 
