@@ -116,7 +116,7 @@ const defaultForm: DomainForm = {
     registrar_link: '',
     registrar_date: '',
     expiry_date: '',
-    service_type: '伪装网站',
+    service_type: '其他',
     status: '在线',
     tgsend: 1,
     st_tgsend: 0,
