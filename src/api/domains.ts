@@ -11,6 +11,7 @@ export interface DomainData {
     status: string
     tgsend: number
     st_tgsend: number
+    site_id?: number | null
     memo: string
     created_at?: string
 }

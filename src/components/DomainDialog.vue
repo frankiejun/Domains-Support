@@ -28,6 +28,16 @@
                     <el-option label="其他" value="其他" />
                 </el-select>
             </el-form-item>
+            <el-form-item v-if="form.service_type === '伪装网站'" label="网站" prop="site_id">
+                <el-select v-model="form.site_id" placeholder="请选择网站" id="site-select-input" autocomplete="off" clearable>
+                    <el-option v-for="site in websites" :key="site.id" :label="site.name" :value="site.id" />
+                </el-select>
+            </el-form-item>
+            <el-form-item v-if="form.service_type === '伪装网站'">
+                <div class="site-hint">
+                    域名 DNS 需要添加本服务器的 A 记录，当前服务器 IP：{{ serverIp || '未获取' }}
+                </div>
+            </el-form-item>
             <el-form-item label="状态" prop="status">
                 <el-select v-model="form.status" placeholder="请选择状态" id="status-input" autocomplete="off" clearable>
                     <el-option label="在线" value="在线" />
@@ -58,7 +68,7 @@
 
 <script setup lang="ts">
 import type { FormInstance, FormRules } from 'element-plus'
-import { defineEmits, defineProps, ref, watch } from 'vue'
+import { computed, defineEmits, defineProps, ref, watch } from 'vue'
 
 interface DomainForm {
     domain: string
@@ -70,6 +80,7 @@ interface DomainForm {
     status: string
     tgsend: number
     st_tgsend: number
+    site_id?: number | null
     memo: string
 }
 
@@ -77,12 +88,15 @@ const props = defineProps<{
     visible: boolean
     isEdit: boolean
     editData?: DomainForm
+    websites?: { id: number; name: string; filename: string }[]
+    serverIp?: string
 }>()
 
 const emit = defineEmits(['update:visible', 'submit'])
 
 const dialogVisible = ref(props.visible)
 const formRef = ref<FormInstance>()
+const websites = computed(() => props.websites || [])
 
 const parseBaseDate = (baseDate: string) => {
     const parsed = new Date(baseDate)
@@ -120,6 +134,7 @@ const defaultForm: DomainForm = {
     status: '在线',
     tgsend: 1,
     st_tgsend: 0,
+    site_id: null,
     memo: ''
 }
 
@@ -146,6 +161,22 @@ const rules = {
     ],
     status: [
         { required: true, message: '请选择状态', trigger: ['change'] as const }
+    ],
+    site_id: [
+        {
+            validator: (_rule, value, callback) => {
+                if (form.value.service_type !== '伪装网站') {
+                    callback()
+                    return
+                }
+                if (!value) {
+                    callback(new Error('请选择网站'))
+                    return
+                }
+                callback()
+            },
+            trigger: ['change'] as const
+        }
     ]
 } satisfies FormRules
 
@@ -176,6 +207,12 @@ watch(() => props.editData, (newVal: DomainForm | undefined) => {
     }
 }, { immediate: true })
 
+watch(() => form.value.service_type, (value) => {
+    if (value !== '伪装网站') {
+        form.value.site_id = null
+    }
+})
+
 // 取消按钮处理
 const handleCancel = () => {
     dialogVisible.value = false
@@ -202,5 +239,10 @@ const handleSubmit = async () => {
     display: flex;
     justify-content: flex-end;
     gap: 10px;
+}
+
+.site-hint {
+    font-size: 12px;
+    color: #909399;
 }
 </style>

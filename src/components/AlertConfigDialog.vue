@@ -29,6 +29,26 @@
             <el-form-item v-if="form.auto_check_enabled === 1" label="每隔多少分钟检查" prop="auto_check_interval">
                 <el-input-number v-model="form.auto_check_interval" :min="1" :max="1440" id="auto-check-interval-input" />
             </el-form-item>
+            <el-divider content-position="left">静态网站</el-divider>
+            <el-form-item label="网站名称">
+                <el-input v-model="newWebsite.name" placeholder="请输入网站名称" id="website-name-input" />
+            </el-form-item>
+            <el-form-item label="文件名">
+                <el-select v-model="newWebsite.filename" placeholder="请选择文件" id="website-file-input" clearable>
+                    <el-option v-for="file in websiteFiles" :key="file" :label="file" :value="file" />
+                </el-select>
+            </el-form-item>
+            <el-form-item>
+                <el-button type="primary" @click="handleAddWebsite">新增</el-button>
+                <el-button type="danger" :disabled="selectedWebsites.length === 0" @click="handleDeleteWebsites">
+                    删除
+                </el-button>
+            </el-form-item>
+            <el-table :data="websites" border style="width: 100%" @selection-change="handleWebsiteSelectionChange">
+                <el-table-column type="selection" width="55" />
+                <el-table-column prop="name" label="网站名称" />
+                <el-table-column prop="filename" label="文件名" />
+            </el-table>
         </el-form>
         <template #footer>
             <span class="dialog-footer">
@@ -41,7 +61,9 @@
 
 <script setup lang="ts">
 import type { FormInstance, FormRules } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { defineEmits, defineProps, ref, watch } from 'vue'
+import { useAuth } from '../utils/auth'
 
 interface AlertConfigForm {
     tg_token: string
@@ -58,7 +80,7 @@ const props = defineProps<{
     config?: AlertConfigForm
 }>()
 
-const emit = defineEmits(['update:visible', 'submit'])
+const emit = defineEmits(['update:visible', 'submit', 'websites-updated'])
 
 const dialogVisible = ref(props.visible)
 const formRef = ref<FormInstance>()
@@ -73,6 +95,17 @@ const form = ref<AlertConfigForm>({
     auto_check_enabled: 0,
     auto_check_interval: 30
 })
+
+interface WebsiteConfig {
+    id: number
+    name: string
+    filename: string
+}
+
+const websites = ref<WebsiteConfig[]>([])
+const websiteFiles = ref<string[]>([])
+const selectedWebsites = ref<WebsiteConfig[]>([])
+const newWebsite = ref({ name: '', filename: '' })
 
 const rules = {
     days: [
@@ -102,6 +135,10 @@ watch(() => props.visible, (newVal) => {
 
 watch(dialogVisible, (newVal) => {
     emit('update:visible', newVal)
+    if (newVal) {
+        loadWebsiteConfigs()
+        loadWebsiteFiles()
+    }
 })
 
 watch(() => props.config, (newVal) => {
@@ -119,6 +156,120 @@ const handleSubmit = async () => {
             dialogVisible.value = false
         }
     })
+}
+
+const loadWebsiteConfigs = async () => {
+    try {
+        const auth = useAuth()
+        const authData = auth.getAuthToken()
+        if (!authData) {
+            throw new Error('未登录或登录已过期')
+        }
+        const response = await fetch('/api/websites', {
+            headers: {
+                'Authorization': `Bearer ${authData.token}`,
+                'Content-Type': 'application/json'
+            }
+        })
+        const result = await response.json() as { status: number; message: string; data: WebsiteConfig[] }
+        if (result.status !== 200) {
+            throw new Error(result.message || '获取失败')
+        }
+        websites.value = result.data || []
+    } catch (error) {
+        ElMessage.error(error instanceof Error ? error.message : '获取失败')
+    }
+}
+
+const loadWebsiteFiles = async () => {
+    try {
+        const auth = useAuth()
+        const authData = auth.getAuthToken()
+        if (!authData) {
+            throw new Error('未登录或登录已过期')
+        }
+        const response = await fetch('/api/websites/files', {
+            headers: {
+                'Authorization': `Bearer ${authData.token}`,
+                'Content-Type': 'application/json'
+            }
+        })
+        const result = await response.json() as { status: number; message: string; data: string[] }
+        if (result.status !== 200) {
+            throw new Error(result.message || '获取失败')
+        }
+        websiteFiles.value = result.data || []
+    } catch (error) {
+        ElMessage.error(error instanceof Error ? error.message : '获取失败')
+    }
+}
+
+const handleAddWebsite = async () => {
+    try {
+        if (!newWebsite.value.name || !newWebsite.value.filename) {
+            ElMessage.warning('请输入名称并选择文件')
+            return
+        }
+        const auth = useAuth()
+        const authData = auth.getAuthToken()
+        if (!authData) {
+            throw new Error('未登录或登录已过期')
+        }
+        const response = await fetch('/api/websites', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${authData.token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(newWebsite.value)
+        })
+        const result = await response.json() as { status: number; message: string }
+        if (result.status !== 200) {
+            throw new Error(result.message || '创建失败')
+        }
+        newWebsite.value = { name: '', filename: '' }
+        await loadWebsiteConfigs()
+        emit('websites-updated')
+        ElMessage.success('创建成功')
+    } catch (error) {
+        ElMessage.error(error instanceof Error ? error.message : '创建失败')
+    }
+}
+
+const handleWebsiteSelectionChange = (selection: WebsiteConfig[]) => {
+    selectedWebsites.value = selection
+}
+
+const handleDeleteWebsites = async () => {
+    try {
+        if (selectedWebsites.value.length === 0) {
+            ElMessage.warning('请选择要删除的记录')
+            return
+        }
+        const auth = useAuth()
+        const authData = auth.getAuthToken()
+        if (!authData) {
+            throw new Error('未登录或登录已过期')
+        }
+        const response = await fetch('/api/websites', {
+            method: 'DELETE',
+            headers: {
+                'Authorization': `Bearer ${authData.token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ ids: selectedWebsites.value.map((item) => item.id) })
+        })
+        const result = await response.json() as { status: number; message: string }
+        if (result.status !== 200) {
+            throw new Error(result.message || '删除失败')
+        }
+        selectedWebsites.value = []
+        await loadWebsiteConfigs()
+        emit('websites-updated')
+        ElMessage.success('删除成功')
+    } catch (error) {
+        ElMessage.error(error instanceof Error ? error.message : '删除失败')
+    }
 }
 </script>
 

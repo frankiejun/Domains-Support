@@ -1,7 +1,9 @@
-import path from 'path'
-import fs from 'fs'
+import { exec } from 'child_process'
 import express from 'express'
+import fs from 'fs'
 import multer from 'multer'
+import os from 'os'
+import path from 'path'
 import initSqlJs from 'sql.js'
 import { fileURLToPath } from 'url'
 
@@ -67,7 +69,14 @@ const ensureSchema = () => {
         status TEXT NOT NULL DEFAULT '离线',
         tgsend INTEGER DEFAULT 0,
         st_tgsend INTEGER DEFAULT 1,
+        site_id INTEGER,
         memo TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`)
+    run(`CREATE TABLE IF NOT EXISTS websitecfg (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        filename TEXT NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`)
     run(`CREATE TABLE IF NOT EXISTS alertcfg (
@@ -83,6 +92,9 @@ const ensureSchema = () => {
     )`)
     if (!hasColumn('domains', 'st_tgsend')) {
         run('ALTER TABLE domains ADD COLUMN st_tgsend INTEGER DEFAULT 1')
+    }
+    if (!hasColumn('domains', 'site_id')) {
+        run('ALTER TABLE domains ADD COLUMN site_id INTEGER')
     }
     if (!hasColumn('alertcfg', 'wx_api')) {
         run('ALTER TABLE alertcfg ADD COLUMN wx_api TEXT')
@@ -165,6 +177,110 @@ const checkDomainStatus = async (domain) => {
         return true
     }
     return await tryFetch('http')
+}
+
+const execCommand = (command) => new Promise((resolve, reject) => {
+    exec(command, (error, stdout, stderr) => {
+        if (error) {
+            reject(new Error(stderr || error.message))
+            return
+        }
+        resolve(stdout)
+    })
+})
+
+const getWebsitesDir = () => process.env.WEBSITES_DIR || path.join(__dirname, '..', 'websites')
+
+const listWebsiteFiles = () => {
+    const dir = getWebsitesDir()
+    if (!fs.existsSync(dir)) {
+        return []
+    }
+    return fs.readdirSync(dir, { withFileTypes: true }).map((entry) => entry.name)
+}
+
+const resolveWebsiteRoot = (filename) => {
+    const dir = getWebsitesDir()
+    const filePath = path.join(dir, filename)
+    if (!fs.existsSync(filePath)) {
+        return null
+    }
+    const stat = fs.statSync(filePath)
+    if (stat.isDirectory()) {
+        return { root: filePath, index: 'index.html' }
+    }
+    return { root: dir, index: filename }
+}
+
+const getServerIp = () => {
+    const interfaces = os.networkInterfaces()
+    for (const name of Object.keys(interfaces)) {
+        for (const net of interfaces[name] || []) {
+            if (net.family === 'IPv4' && !net.internal) {
+                return net.address
+            }
+        }
+    }
+    return '127.0.0.1'
+}
+
+const writeNginxConfig = async (domain, filename) => {
+    const nginxSitesDir = process.env.NGINX_SITES_DIR
+    if (!nginxSitesDir) return
+    const resolved = resolveWebsiteRoot(filename)
+    if (!resolved) return
+    if (!fs.existsSync(nginxSitesDir)) {
+        fs.mkdirSync(nginxSitesDir, { recursive: true })
+    }
+    const config = [
+        'server {',
+        '    listen 80;',
+        `    server_name ${domain};`,
+        `    root ${resolved.root};`,
+        `    index ${resolved.index};`,
+        '    location / {',
+        '        try_files $uri $uri/ =404;',
+        '    }',
+        '}',
+        ''
+    ].join('\n')
+    const configPath = path.join(nginxSitesDir, `${domain}.conf`)
+    fs.writeFileSync(configPath, config)
+    const reloadCmd = process.env.NGINX_RELOAD_CMD
+    if (reloadCmd) {
+        await execCommand(reloadCmd)
+    }
+}
+
+const removeNginxConfig = async (domain) => {
+    const nginxSitesDir = process.env.NGINX_SITES_DIR
+    if (!nginxSitesDir) return
+    const configPath = path.join(nginxSitesDir, `${domain}.conf`)
+    if (fs.existsSync(configPath)) {
+        fs.unlinkSync(configPath)
+    }
+    const reloadCmd = process.env.NGINX_RELOAD_CMD
+    if (reloadCmd) {
+        await execCommand(reloadCmd)
+    }
+}
+
+const applyCertbot = async (domain) => {
+    const certbotCmd = process.env.CERTBOT_CMD
+    if (!certbotCmd) return
+    const command = certbotCmd.includes('{domain}') ? certbotCmd.replace('{domain}', domain) : `${certbotCmd} -d ${domain}`
+    await execCommand(command)
+}
+
+const applyWebsiteBinding = async (domain, siteId) => {
+    const site = readRow('SELECT * FROM websitecfg WHERE id = ?', [siteId])
+    if (!site) return
+    await writeNginxConfig(domain, site.filename)
+    await applyCertbot(domain)
+}
+
+const removeWebsiteBinding = async (domain) => {
+    await removeNginxConfig(domain)
 }
 
 const sendTelegramMessage = async (token, chatId, message) => {
@@ -339,6 +455,10 @@ const startServer = async () => {
         }
     })
 
+    app.get('/api/system/ip', (_req, res) => {
+        return res.json({ status: 200, message: '获取成功', data: { ip: getServerIp() } })
+    })
+
     app.get('/api/domains', (req, res) => {
         try {
             const rows = readRows('SELECT * FROM domains ORDER BY created_at DESC')
@@ -348,7 +468,7 @@ const startServer = async () => {
         }
     })
 
-    app.post('/api/domains', (req, res) => {
+    app.post('/api/domains', async (req, res) => {
         try {
             const data = req.body || {}
             const requiredFields = ['domain', 'registrar', 'registrar_date', 'expiry_date', 'service_type', 'status']
@@ -357,10 +477,13 @@ const startServer = async () => {
                     return res.status(400).json({ status: 400, message: `${field} 是必填字段`, data: null })
                 }
             }
+            if (data.service_type === '伪装网站' && !data.site_id) {
+                return res.status(400).json({ status: 400, message: '请选择网站', data: null })
+            }
             run(`INSERT INTO domains (
                 domain, registrar, registrar_link, registrar_date,
-                expiry_date, service_type, status, tgsend, st_tgsend, memo
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                expiry_date, service_type, status, tgsend, st_tgsend, site_id, memo
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
                 data.domain,
                 data.registrar,
                 data.registrar_link || '',
@@ -370,8 +493,12 @@ const startServer = async () => {
                 data.status,
                 data.tgsend ?? 1,
                 data.st_tgsend ?? 0,
+                data.site_id || null,
                 data.memo || ''
             ])
+            if (data.service_type === '伪装网站' && data.site_id) {
+                await applyWebsiteBinding(data.domain, data.site_id)
+            }
             const created = readRow('SELECT * FROM domains WHERE id = last_insert_rowid()')
             persistDb()
             return res.json({ status: 200, message: '创建成功', data: created })
@@ -380,7 +507,7 @@ const startServer = async () => {
         }
     })
 
-    app.put('/api/domains/:id', (req, res) => {
+    app.put('/api/domains/:id', async (req, res) => {
         try {
             const id = req.params.id
             const data = req.body || {}
@@ -389,6 +516,13 @@ const startServer = async () => {
                 if (!data[field]) {
                     return res.status(400).json({ status: 400, message: `${field} 是必填字段`, data: null })
                 }
+            }
+            if (data.service_type === '伪装网站' && !data.site_id) {
+                return res.status(400).json({ status: 400, message: '请选择网站', data: null })
+            }
+            const existing = readRow('SELECT * FROM domains WHERE id = ?', [id])
+            if (!existing) {
+                return res.status(404).json({ status: 404, message: '域名不存在', data: null })
             }
             run(`UPDATE domains SET
                 domain = ?,
@@ -400,6 +534,7 @@ const startServer = async () => {
                 status = ?,
                 tgsend = ?,
                 st_tgsend = ?,
+                site_id = ?,
                 memo = ?
             WHERE id = ?`, [
                 data.domain,
@@ -411,12 +546,19 @@ const startServer = async () => {
                 data.status,
                 data.tgsend || 0,
                 data.st_tgsend ?? 1,
+                data.service_type === '伪装网站' ? data.site_id : null,
                 data.memo || '',
                 id
             ])
             const updated = readRow('SELECT * FROM domains WHERE id = ?', [id])
-            if (!updated) {
-                return res.status(404).json({ status: 404, message: '域名不存在', data: null })
+            if (existing.service_type === '伪装网站' && data.service_type !== '伪装网站') {
+                await removeWebsiteBinding(existing.domain)
+            }
+            if (existing.service_type === '伪装网站' && data.service_type === '伪装网站' && existing.domain !== data.domain) {
+                await removeWebsiteBinding(existing.domain)
+            }
+            if (data.service_type === '伪装网站' && data.site_id) {
+                await applyWebsiteBinding(data.domain, data.site_id)
             }
             persistDb()
             return res.json({ status: 200, message: '更新成功', data: updated })
@@ -425,10 +567,14 @@ const startServer = async () => {
         }
     })
 
-    app.delete('/api/domains/:id', (req, res) => {
+    app.delete('/api/domains/:id', async (req, res) => {
         try {
             const id = req.params.id
+            const existing = readRow('SELECT * FROM domains WHERE id = ?', [id])
             run('DELETE FROM domains WHERE id = ?', [id])
+            if (existing?.service_type === '伪装网站') {
+                await removeWebsiteBinding(existing.domain)
+            }
             persistDb()
             return res.json({ status: 200, message: '删除成功', data: null })
         } catch (error) {
@@ -472,7 +618,7 @@ const startServer = async () => {
 
     app.get('/api/domains/export', (req, res) => {
         try {
-            const rows = readRows('SELECT domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, memo, tgsend, st_tgsend FROM domains')
+            const rows = readRows('SELECT domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, memo, tgsend, st_tgsend, site_id FROM domains')
             const filename = `domains-export-${new Date().toISOString().split('T')[0]}.json`
             res.setHeader('Content-Type', 'application/json')
             res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
@@ -525,7 +671,8 @@ const startServer = async () => {
                             status = ?, 
                             memo = ?, 
                             tgsend = ?, 
-                            st_tgsend = ?
+                            st_tgsend = ?,
+                            site_id = ?
                         WHERE domain = ?`, [
                             domain.registrar || '',
                             domain.registrar_link || '',
@@ -536,12 +683,13 @@ const startServer = async () => {
                             domain.memo || '',
                             domain.tgsend || 0,
                             domain.st_tgsend || 0,
+                            domain.site_id || null,
                             domain.domain
                         ])
                     } else {
                         run(`INSERT INTO domains 
-                            (domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, memo, tgsend, st_tgsend)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                            (domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, memo, tgsend, st_tgsend, site_id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
                             domain.domain,
                             domain.registrar || '',
                             domain.registrar_link || '',
@@ -551,7 +699,8 @@ const startServer = async () => {
                             domain.status || '离线',
                             domain.memo || '',
                             domain.tgsend || 0,
-                            domain.st_tgsend || 0
+                            domain.st_tgsend || 0,
+                            domain.site_id || null
                         ])
                     }
                     results.success += 1
@@ -620,6 +769,67 @@ const startServer = async () => {
             return res.json({ status: 200, message: existing ? '更新成功' : '保存成功', data: config })
         } catch (error) {
             return res.status(500).json({ status: 500, message: error instanceof Error ? error.message : '保存配置失败', data: null })
+        }
+    })
+
+    app.get('/api/websites', (_req, res) => {
+        try {
+            const rows = readRows('SELECT * FROM websitecfg ORDER BY created_at DESC')
+            return res.json({ status: 200, message: '获取成功', data: rows })
+        } catch (error) {
+            return res.status(500).json({ status: 500, message: '获取失败', data: [] })
+        }
+    })
+
+    app.get('/api/websites/files', (_req, res) => {
+        try {
+            const files = listWebsiteFiles()
+            return res.json({ status: 200, message: '获取成功', data: files })
+        } catch (error) {
+            return res.status(500).json({ status: 500, message: '获取失败', data: [] })
+        }
+    })
+
+    app.post('/api/websites', (req, res) => {
+        try {
+            const data = req.body || {}
+            if (!data.name || !data.filename) {
+                return res.status(400).json({ status: 400, message: 'name 和 filename 是必填字段', data: null })
+            }
+            const files = listWebsiteFiles()
+            if (!files.includes(data.filename)) {
+                return res.status(400).json({ status: 400, message: '文件不存在', data: null })
+            }
+            const existing = readRow('SELECT id FROM websitecfg WHERE name = ?', [data.name])
+            if (existing) {
+                return res.status(409).json({ status: 409, message: '网站名称已存在', data: null })
+            }
+            run('INSERT INTO websitecfg (name, filename) VALUES (?, ?)', [data.name, data.filename])
+            const created = readRow('SELECT * FROM websitecfg WHERE id = last_insert_rowid()')
+            persistDb()
+            return res.json({ status: 200, message: '创建成功', data: created })
+        } catch (error) {
+            return res.status(500).json({ status: 500, message: '创建失败', data: null })
+        }
+    })
+
+    app.delete('/api/websites', (req, res) => {
+        try {
+            const data = req.body || {}
+            const ids = Array.isArray(data.ids) ? data.ids.filter(Boolean) : []
+            if (ids.length === 0) {
+                return res.status(400).json({ status: 400, message: 'ids 是必填字段', data: null })
+            }
+            const placeholders = ids.map(() => '?').join(',')
+            const usage = readRow(`SELECT COUNT(1) as count FROM domains WHERE site_id IN (${placeholders})`, ids)
+            if (usage?.count > 0) {
+                return res.status(400).json({ status: 400, message: '存在已绑定的域名，无法删除', data: null })
+            }
+            run(`DELETE FROM websitecfg WHERE id IN (${placeholders})`, ids)
+            persistDb()
+            return res.json({ status: 200, message: '删除成功', data: null })
+        } catch (error) {
+            return res.status(500).json({ status: 500, message: '删除失败', data: null })
         }
     })
 

@@ -133,9 +133,10 @@
         </div>
 
         <DomainDialog v-model:visible="dialogVisible" :is-edit="isEdit" :edit-data="editData"
-            @submit="handleDialogSubmit" />
+            :websites="websiteConfigs" :server-ip="serverIp" @submit="handleDialogSubmit" />
 
-        <AlertConfigDialog v-model:visible="configVisible" :config="alertConfig" @submit="handleConfigSubmit" />
+        <AlertConfigDialog v-model:visible="configVisible" :config="alertConfig" @submit="handleConfigSubmit"
+            @websites-updated="loadWebsiteConfigs" />
 
         <ImportDialog v-model:visible="importVisible" @success="loadDomains" />
 
@@ -191,6 +192,11 @@ interface AlertConfig {
     auto_check_interval: number
 }
 
+interface WebsiteConfig {
+    id: number
+    name: string
+    filename: string
+}
 interface ApiResponse<T = any> {
     status: number
     message: string
@@ -202,6 +208,8 @@ const auth = useAuth()
 const domains = ref<Domain[]>([])
 const alertDays = ref(30)
 const alertConfig = ref<AlertConfig>()
+const websiteConfigs = ref<WebsiteConfig[]>([])
+const serverIp = ref('')
 const refreshingTable = ref(false)
 const refreshingStatus = ref(false)
 const refreshLoading = computed(() => refreshingTable.value || refreshingStatus.value)
@@ -309,6 +317,7 @@ const handleCopyAdd = () => {
         status: row.status,
         tgsend: row.tgsend,
         st_tgsend: row.st_tgsend,
+        site_id: row.site_id,
         memo: row.memo
     }
     dialogVisible.value = true
@@ -372,6 +381,7 @@ const handleCopyInfo = () => {
                 status: source.status,
                 tgsend: source.tgsend,
                 st_tgsend: source.st_tgsend,
+                site_id: source.site_id,
                 memo: source.memo
             }
 
@@ -671,6 +681,50 @@ const handleRefreshStatus = async (showMessage = true) => {
     }
 }
 
+const loadWebsiteConfigs = async () => {
+    try {
+        const authData = auth.getAuthToken()
+        if (!authData) {
+            throw new Error('未登录或登录已过期')
+        }
+        const response = await fetch('/api/websites', {
+            headers: {
+                'Authorization': `Bearer ${authData.token}`,
+                'Content-Type': 'application/json'
+            }
+        })
+        const result = await response.json() as ApiResponse<WebsiteConfig[]>
+        if (result.status !== 200) {
+            throw new Error(result.message || '获取网站配置失败')
+        }
+        websiteConfigs.value = result.data || []
+    } catch (error: unknown) {
+        console.error('获取网站配置失败:', error)
+    }
+}
+
+const loadServerIp = async () => {
+    try {
+        const authData = auth.getAuthToken()
+        if (!authData) {
+            throw new Error('未登录或登录已过期')
+        }
+        const response = await fetch('/api/system/ip', {
+            headers: {
+                'Authorization': `Bearer ${authData.token}`,
+                'Content-Type': 'application/json'
+            }
+        })
+        const result = await response.json() as ApiResponse<{ ip: string }>
+        if (result.status !== 200) {
+            throw new Error(result.message || '获取服务器 IP 失败')
+        }
+        serverIp.value = result.data?.ip || ''
+    } catch (error) {
+        console.error('获取服务器 IP 失败:', error)
+    }
+}
+
 // 在组件加载时获取告警配置
 const loadAlertConfig = async () => {
     try {
@@ -788,6 +842,8 @@ onMounted(() => {
     checkLoginStatus()
     loadDomains()
     loadAlertConfig()
+    loadWebsiteConfigs()
+    loadServerIp()
 })
 </script>
 
