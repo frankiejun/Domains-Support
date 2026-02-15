@@ -3,8 +3,18 @@
         <div class="header">
             <h2>域名管理系统(Domains-Support)</h2>
             <div class="header-buttons">
-                <el-button type="primary" size="small" :icon="Refresh" :loading="refreshing"
-                    @click="handleRefresh">刷新</el-button>
+                <el-dropdown trigger="click">
+                    <el-button type="primary" size="small" :icon="Refresh" :loading="refreshLoading">
+                        刷新
+                        <el-icon class="el-icon--right"><arrow-down /></el-icon>
+                    </el-button>
+                    <template #dropdown>
+                        <el-dropdown-menu>
+                            <el-dropdown-item @click="handleRefreshTable">刷新页面</el-dropdown-item>
+                            <el-dropdown-item @click="handleRefreshStatus">检查域名状态</el-dropdown-item>
+                        </el-dropdown-menu>
+                    </template>
+                </el-dropdown>
                 <el-dropdown trigger="click">
                     <el-button type="primary" size="small">
                         系统
@@ -177,6 +187,8 @@ interface AlertConfig {
     wx_api: string
     wx_token: string
     days: number
+    auto_check_enabled: number
+    auto_check_interval: number
 }
 
 interface ApiResponse<T = any> {
@@ -190,7 +202,9 @@ const auth = useAuth()
 const domains = ref<Domain[]>([])
 const alertDays = ref(30)
 const alertConfig = ref<AlertConfig>()
-const refreshing = ref(false)
+const refreshingTable = ref(false)
+const refreshingStatus = ref(false)
+const refreshLoading = computed(() => refreshingTable.value || refreshingStatus.value)
 const permanentExpiryDate = '2099-12-31'
 
 // 搜索和分页状态
@@ -579,7 +593,11 @@ const handleConfigSubmit = async (config: AlertConfig) => {
         if (result.status === 200) {
             ElMessage.success('配置保存成功')
             alertDays.value = config.days
-            alertConfig.value = config
+            alertConfig.value = {
+                ...config,
+                auto_check_enabled: config.auto_check_enabled ?? 0,
+                auto_check_interval: config.auto_check_interval ?? 30
+            }
         } else {
             throw new Error(result.message || '保存失败')
         }
@@ -597,97 +615,59 @@ const handleConfigSubmit = async (config: AlertConfig) => {
     }
 }
 
-const updateDomainStatus = async (domain: string, status: string): Promise<Domain> => {
+const handleRefreshTable = async () => {
+    if (refreshingTable.value) return
+
     try {
-        const authData = auth.getAuthToken()
-        if (!authData) {
-            throw new Error('未登录或登录已过期')
-        }
-
-        const response = await fetch('/api/domains/status', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${authData.token}`
-            },
-            body: JSON.stringify({ domain, status })
-        })
-
-        const result = await response.json() as ApiResponse<Domain>
-
-        if (result.status === 200) {
-            //ElMessage.success('状态更新成功')
-            return result.data
-        } else {
-            throw new Error(result.message || '更新失败')
-        }
+        refreshingTable.value = true
+        await loadDomains()
     } catch (error: unknown) {
-        console.error('更新状态失败:', error)
-        if (error instanceof Error) {
-            ElMessage.error(error.message)
-            if (error.message === '未授权访问' || error.message === '无效的访问令牌') {
-                auth.clearAuth()
-                router.push({ name: 'Login' })
-            }
-        } else {
-            ElMessage.error('更新状态失败')
-        }
-        throw error
+        console.error('刷新表格失败:', error)
+        ElMessage.error(error instanceof Error ? error.message : '刷新表格失败')
+    } finally {
+        refreshingTable.value = false
     }
 }
 
-const checkDomainStatus = async (domain: string): Promise<string> => {
+const handleRefreshStatus = async (showMessage = true) => {
+    if (refreshingStatus.value) return
+
     try {
+        refreshingStatus.value = true
+        if (showMessage) {
+            ElMessage.info('正在检查域名状态...')
+        }
         const authData = auth.getAuthToken()
         if (!authData) {
             throw new Error('未登录或登录已过期')
         }
-
-        const response = await fetch('/api/domains/check', {
+        const response = await fetch('/api/domains/check-all', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${authData.token}`
-            },
-            body: JSON.stringify({ domain })
+            }
         })
-
-        const result = await response.json() as ApiResponse<{ status: string }>
-
-        if (result.status === 200) {
-            return result.data.status
-        } else {
+        if (response.status === 401) {
+            auth.clearAuth()
+            router.push({ name: 'Login' })
+            throw new Error('未授权访问')
+        }
+        const result = await response.json() as ApiResponse<Domain[]>
+        if (result.status !== 200) {
             throw new Error(result.message || '检查失败')
         }
-    } catch (error) {
-        console.error(`检查域名 ${domain} 状态失败:`, error)
-        return '离线'
-    }
-}
-
-const handleRefresh = async () => {
-    if (refreshing.value) return
-
-    try {
-        refreshing.value = true
-        ElMessage.info('正在检查域名状态...')
-
-        // 并行检查所有域名状态
-        const statusChecks = domains.value.map(async (domain:Domain) => {
-            const status = await checkDomainStatus(domain.domain)
-            const updatedDomain = await updateDomainStatus(domain.domain, status)
-            return updatedDomain
-        })
-
-        // 等待所有检查完成
-        const updatedDomains = await Promise.all(statusChecks)
-        domains.value = updatedDomains
-        ElMessage.success('状态刷新完成')
+        domains.value = result.data || []
+        if (showMessage) {
+            ElMessage.success('状态刷新完成')
+        }
     } catch (error: unknown) {
         console.error('刷新状态失败:', error)
-        ElMessage.error(error instanceof Error ? error.message : '刷新状态失败')
+        if (showMessage) {
+            ElMessage.error(error instanceof Error ? error.message : '刷新状态失败')
+        }
     } finally {
-        refreshing.value = false
+        refreshingStatus.value = false
     }
 }
 
@@ -707,9 +687,26 @@ const loadAlertConfig = async () => {
         })
         const result = await response.json() as ApiResponse<AlertConfig>
 
-        if (result.status === 200 && result.data) {
-            alertConfig.value = result.data
-            alertDays.value = result.data.days
+        if (result.status === 200) {
+            if (result.data) {
+                alertConfig.value = {
+                    ...result.data,
+                    auto_check_enabled: result.data.auto_check_enabled ?? 0,
+                    auto_check_interval: result.data.auto_check_interval ?? 30
+                }
+                alertDays.value = result.data.days
+            } else {
+                alertConfig.value = {
+                    tg_token: '',
+                    tg_userid: '',
+                    wx_api: '',
+                    wx_token: '',
+                    days: 30,
+                    auto_check_enabled: 0,
+                    auto_check_interval: 30
+                }
+                alertDays.value = 30
+            }
         } else {
             throw new Error(result.message || '获取配置失败')
         }

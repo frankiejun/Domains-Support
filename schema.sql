@@ -31,3 +31,5 @@ update domains set st_tgsend = 1 where st_tgsend is null;
 --v1.0.6 更新sql,需到cf上的domains-db的控制台上运行，用于添加微信通知功能
 ALTER TABLE alertcfg ADD COLUMN wx_api TEXT;
 ALTER TABLE alertcfg ADD COLUMN wx_token TEXT;
+ALTER TABLE alertcfg ADD COLUMN auto_check_enabled INTEGER DEFAULT 0;
+ALTER TABLE alertcfg ADD COLUMN auto_check_interval INTEGER DEFAULT 30;

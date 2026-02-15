@@ -22,6 +22,13 @@
             <el-form-item label="剩余多少天告警" prop="days">
                 <el-input-number v-model="form.days" :min="1" :max="365" id="days-input" />
             </el-form-item>
+            <el-form-item label="自动检查域名状态" prop="auto_check_enabled">
+                <el-switch v-model="form.auto_check_enabled" :active-value="1" :inactive-value="0" inline-prompt
+                    active-text="开启" inactive-text="关闭" id="auto-check-enabled-input" />
+            </el-form-item>
+            <el-form-item v-if="form.auto_check_enabled === 1" label="每隔多少分钟检查" prop="auto_check_interval">
+                <el-input-number v-model="form.auto_check_interval" :min="1" :max="1440" id="auto-check-interval-input" />
+            </el-form-item>
         </el-form>
         <template #footer>
             <span class="dialog-footer">
@@ -33,8 +40,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, defineProps, defineEmits, watch } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
+import { defineEmits, defineProps, ref, watch } from 'vue'
 
 interface AlertConfigForm {
     tg_token: string
@@ -42,6 +49,8 @@ interface AlertConfigForm {
     wx_api: string
     wx_token: string
     days: number
+    auto_check_enabled: number
+    auto_check_interval: number
 }
 
 const props = defineProps<{
@@ -60,12 +69,30 @@ const form = ref<AlertConfigForm>({
     tg_userid: '',
     wx_api: '',
     wx_token: '',
-    days: 30
+    days: 30,
+    auto_check_enabled: 0,
+    auto_check_interval: 30
 })
 
 const rules = {
     days: [
         { required: true, message: '请输入告警天数', trigger: 'change' }
+    ],
+    auto_check_interval: [
+        {
+            validator: (_rule, value, callback) => {
+                if (form.value.auto_check_enabled !== 1) {
+                    callback()
+                    return
+                }
+                if (!value || value < 1) {
+                    callback(new Error('请输入检查间隔'))
+                    return
+                }
+                callback()
+            },
+            trigger: 'change'
+        }
     ]
 } satisfies FormRules
 
@@ -79,7 +106,7 @@ watch(dialogVisible, (newVal) => {
 
 watch(() => props.config, (newVal) => {
     if (newVal) {
-        form.value = { ...newVal }
+        form.value = { ...form.value, ...newVal }
     }
 }, { immediate: true })
 

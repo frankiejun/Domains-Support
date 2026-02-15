@@ -16,6 +16,7 @@ const dbFilePath = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'do
 
 let SQL = null
 let db = null
+let autoCheckTimer = null
 
 const ensureDir = () => {
     const dir = path.dirname(dbFilePath)
@@ -75,6 +76,8 @@ const ensureSchema = () => {
         tg_userid TEXT,
         wx_api TEXT,
         wx_token TEXT,
+        auto_check_enabled INTEGER DEFAULT 0,
+        auto_check_interval INTEGER DEFAULT 30,
         days INTEGER NOT NULL DEFAULT 30,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`)
@@ -86,6 +89,12 @@ const ensureSchema = () => {
     }
     if (!hasColumn('alertcfg', 'wx_token')) {
         run('ALTER TABLE alertcfg ADD COLUMN wx_token TEXT')
+    }
+    if (!hasColumn('alertcfg', 'auto_check_enabled')) {
+        run('ALTER TABLE alertcfg ADD COLUMN auto_check_enabled INTEGER DEFAULT 0')
+    }
+    if (!hasColumn('alertcfg', 'auto_check_interval')) {
+        run('ALTER TABLE alertcfg ADD COLUMN auto_check_interval INTEGER DEFAULT 30')
     }
     persistDb()
 }
@@ -194,6 +203,102 @@ const sendWeChatMessage = async (apiUrl, token, title, text) => {
     })
 }
 
+const runWithConcurrency = async (items, limit, task) => {
+    const results = new Array(items.length)
+    let nextIndex = 0
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+        while (nextIndex < items.length) {
+            const currentIndex = nextIndex
+            nextIndex += 1
+            results[currentIndex] = await task(items[currentIndex], currentIndex)
+        }
+    })
+    await Promise.all(workers)
+    return results
+}
+
+const checkAllDomains = async () => {
+    const domainList = readRows('SELECT * FROM domains ORDER BY created_at DESC')
+    if (domainList.length === 0) {
+        return []
+    }
+    const updatedDomains = await runWithConcurrency(domainList, 10, async (domain) => {
+        const isOnline = await checkDomainStatus(domain.domain)
+        const status = isOnline ? '在线' : '离线'
+        run('UPDATE domains SET status = ? WHERE id = ?', [status, domain.id])
+        return { ...domain, status }
+    })
+    persistDb()
+    return updatedDomains
+}
+
+const checkAndNotifyDomains = async () => {
+    const config = readRow('SELECT * FROM alertcfg LIMIT 1')
+    if (!config) {
+        return { total: 0, notified: 0 }
+    }
+    const domains = readRows('SELECT domain, expiry_date, tgsend, st_tgsend FROM domains WHERE tgsend = 1 OR st_tgsend = 1')
+    if (domains.length === 0) {
+        return { total: 0, notified: 0 }
+    }
+    const results = await runWithConcurrency(domains, 10, async (domain) => {
+        const remainingDays = calculateRemainingDays(domain.expiry_date)
+        const isOnline = await checkDomainStatus(domain.domain)
+        const status = isOnline ? '在线' : '离线'
+        run('UPDATE domains SET status = ? WHERE domain = ?', [status, domain.domain])
+        return { ...domain, status, remainingDays }
+    })
+    const offlineDomains = results.filter((d) => d.status === '离线' && d.st_tgsend === 1)
+    const expiringDomains = results.filter((d) => d.remainingDays <= config.days && d.tgsend === 1)
+    if (offlineDomains.length > 0) {
+        const offlineDetails = offlineDomains.map((d) => `\`${d.domain}\``).join('\n')
+        const message = `*🔔 Domains-Support 通知*\n\n⚠️ *域名服务离线告警*\n\n以下域名无法访问，请立即检查：\n${offlineDetails}\n\n⏰ 时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
+        try {
+            if (config.tg_token && config.tg_userid) {
+                await sendTelegramMessage(config.tg_token, config.tg_userid, message)
+            }
+            if (config.wx_api && config.wx_token) {
+                await sendWeChatMessage(config.wx_api, config.wx_token, '域名服务离线告警', message)
+            }
+        } catch (error) {
+        }
+    }
+    if (expiringDomains.length > 0) {
+        const expiringDetails = expiringDomains
+            .map((d) => `\`${d.domain}\` (还剩 ${d.remainingDays} 天, ${d.expiry_date})`)
+            .join('\n')
+        const message = `*🔔 Domains-Support 通知*\n\n⚠️ *域名即将过期提醒*\n\n以下域名即将在 ${config.days} 天内过期，请及时续费：\n${expiringDetails}\n\n⏰ 时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
+        try {
+            if (config.tg_token && config.tg_userid) {
+                await sendTelegramMessage(config.tg_token, config.tg_userid, message)
+            }
+            if (config.wx_api && config.wx_token) {
+                await sendWeChatMessage(config.wx_api, config.wx_token, '域名即将过期提醒', message)
+            }
+        } catch (error) {
+        }
+    }
+    persistDb()
+    return { total: results.length, notified: offlineDomains.length + expiringDomains.length }
+}
+
+const stopAutoCheck = () => {
+    if (autoCheckTimer) {
+        clearInterval(autoCheckTimer)
+        autoCheckTimer = null
+    }
+}
+
+const applyAutoCheckConfig = (config) => {
+    stopAutoCheck()
+    if (!config || config.auto_check_enabled !== 1) return
+    const intervalMinutes = Number(config.auto_check_interval || 0)
+    if (intervalMinutes <= 0) return
+    autoCheckTimer = setInterval(() => {
+        checkAndNotifyDomains().catch(() => {})
+    }, intervalMinutes * 60 * 1000)
+}
+
 const startServer = async () => {
     SQL = await initSqlJs()
     if (fs.existsSync(dbFilePath)) {
@@ -203,6 +308,8 @@ const startServer = async () => {
         db = new SQL.Database()
     }
     ensureSchema()
+    const initialConfig = readRow('SELECT * FROM alertcfg LIMIT 1')
+    applyAutoCheckConfig(initialConfig)
 
     app.use(express.json({ limit: '5mb' }))
 
@@ -354,6 +461,15 @@ const startServer = async () => {
         }
     })
 
+    app.post('/api/domains/check-all', async (_req, res) => {
+        try {
+            const updatedDomains = await checkAllDomains()
+            return res.json({ status: 200, message: '检查完成', data: updatedDomains })
+        } catch (error) {
+            return res.status(500).json({ status: 500, message: error instanceof Error ? error.message : '检查失败', data: null })
+        }
+    })
+
     app.get('/api/domains/export', (req, res) => {
         try {
             const rows = readRows('SELECT domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, memo, tgsend, st_tgsend FROM domains')
@@ -469,30 +585,38 @@ const startServer = async () => {
             if (!data.days) {
                 return res.status(400).json({ status: 400, message: 'days 是必填字段', data: null })
             }
+            if (data.auto_check_enabled === 1 && (!data.auto_check_interval || data.auto_check_interval < 1)) {
+                return res.status(400).json({ status: 400, message: 'auto_check_interval 是必填字段', data: null })
+            }
             const existing = readRow('SELECT id FROM alertcfg LIMIT 1')
             if (existing) {
                 run(`UPDATE alertcfg
-                    SET tg_token = ?, tg_userid = ?, wx_api = ?, wx_token = ?, days = ?
+                    SET tg_token = ?, tg_userid = ?, wx_api = ?, wx_token = ?, auto_check_enabled = ?, auto_check_interval = ?, days = ?
                     WHERE id = ?`, [
                     data.tg_token || '',
                     data.tg_userid || '',
                     data.wx_api || '',
                     data.wx_token || '',
+                    data.auto_check_enabled ?? 0,
+                    data.auto_check_interval ?? 30,
                     data.days,
                     existing.id
                 ])
             } else {
-                run(`INSERT INTO alertcfg (tg_token, tg_userid, wx_api, wx_token, days)
-                    VALUES (?, ?, ?, ?, ?)`, [
+                run(`INSERT INTO alertcfg (tg_token, tg_userid, wx_api, wx_token, auto_check_enabled, auto_check_interval, days)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)`, [
                     data.tg_token || '',
                     data.tg_userid || '',
                     data.wx_api || '',
                     data.wx_token || '',
+                    data.auto_check_enabled ?? 0,
+                    data.auto_check_interval ?? 30,
                     data.days
                 ])
             }
             const config = readRow('SELECT * FROM alertcfg LIMIT 1')
             persistDb()
+            applyAutoCheckConfig(config)
             return res.json({ status: 200, message: existing ? '更新成功' : '保存成功', data: config })
         } catch (error) {
             return res.status(500).json({ status: 500, message: error instanceof Error ? error.message : '保存配置失败', data: null })
