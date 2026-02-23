@@ -8,7 +8,7 @@
 
 
 
-一个基于 Node.js + SQLite 的域名管理系统，帮助您轻松管理和监控多个域名的状态、到期时间等信息。需配合serv00或者[DScheck](https://github.com/frankiejun/DScheck)使用.
+一个基于 Node.js + SQLite 的域名管理系统，帮助您轻松管理和监控多个域名的状态、到期时间等信息。
 
 ## 视频教学  
 [Domains-Support 配合SERV00/hostUNO，堪称养域名神器！](https://youtu.be/gPJ7tjRKnzo?si=X7zD4eiW7AyeXshQ)

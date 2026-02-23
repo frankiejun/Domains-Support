@@ -1,4 +1,5 @@
 import { exec } from 'child_process'
+import dotenv from 'dotenv'
 import express from 'express'
 import fs from 'fs'
 import multer from 'multer'
@@ -7,9 +8,11 @@ import path from 'path'
 import initSqlJs from 'sql.js'
 import { fileURLToPath } from 'url'
 
+
+
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
-
+dotenv.config({ path: path.join(__dirname, '..', '.env') })
 const app = express()
 const upload = multer()
 
