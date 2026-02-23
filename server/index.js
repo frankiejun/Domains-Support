@@ -400,6 +400,28 @@ const hasWildcardCertificate = async (domain) => {
     }
 }
 
+const listCertbotDomains = async () => {
+    const certbotListCmd = process.env.CERTBOT_CERTS_CMD || 'certbot certificates'
+    try {
+        const output = await execCommand(certbotListCmd)
+        const domainLines = output
+            .split('\n')
+            .map((line) => line.trim())
+            .filter((line) => line.startsWith('Domains:'))
+        const domains = new Set()
+        for (const line of domainLines) {
+            const items = line.replace('Domains:', '').trim().split(/\s+/).filter(Boolean)
+            for (const item of items) {
+                domains.add(item)
+            }
+        }
+        return domains
+    } catch (error) {
+        appendLog('certbot', `list certificates failed: ${error instanceof Error ? error.message : String(error)}`)
+        return new Set()
+    }
+}
+
 const cleanValue = (value) => {
     if (!value) return ''
     return value.trim().replace(/^['"`]+|['"`]+$/g, '')
@@ -457,6 +479,24 @@ const processCertRetries = async () => {
         if (!row.site_id) return
         runAsyncTask(`retry binding ${row.domain}`, () => applyWebsiteBinding(row.domain, row.site_id))
     })
+}
+
+const syncCertStatusFromCertbot = async () => {
+    const certDomains = await listCertbotDomains()
+    if (certDomains.size === 0) return
+    const rows = readRows(`SELECT domain, cert_status FROM domains WHERE service_type = '伪装网站'`)
+    let updatedCount = 0
+    for (const row of rows) {
+        const wildcard = getWildcardCandidate(row.domain)
+        const hasCert = certDomains.has(row.domain) || (wildcard ? certDomains.has(wildcard) : false)
+        if (hasCert && row.cert_status !== '成功') {
+            updateCertStatus(row.domain, '成功', { retryAt: null, retryCount: 0 })
+            updatedCount += 1
+        }
+    }
+    if (updatedCount > 0) {
+        appendLog('certbot', `cert status sync updated ${updatedCount}`)
+    }
 }
 
 const applyCertbot = async (domain) => {
@@ -680,6 +720,7 @@ const startServer = async () => {
     ensureSchema()
     const initialConfig = readRow('SELECT * FROM alertcfg LIMIT 1')
     applyAutoCheckConfig(initialConfig)
+    runAsyncTask('cert status sync', syncCertStatusFromCertbot)
     if (certRetryTimer) {
         clearInterval(certRetryTimer)
         certRetryTimer = null
