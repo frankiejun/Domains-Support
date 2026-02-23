@@ -350,13 +350,55 @@ const removeNginxConfig = async (domain) => {
     }
 }
 
+const getWildcardCandidate = (domain) => {
+    if (!domain || !domain.includes('.')) return null
+    if (domain.startsWith('*.')) return domain
+    const parts = domain.split('.').filter(Boolean)
+    if (parts.length < 2) return null
+    if (parts.length === 2) return `*.${domain}`
+    return `*.${parts.slice(1).join('.')}`
+}
+
+const hasWildcardCertificate = async (domain) => {
+    const wildcard = getWildcardCandidate(domain)
+    if (!wildcard) return false
+    const certbotListCmd = process.env.CERTBOT_CERTS_CMD || 'certbot certificates'
+    try {
+        const output = await execCommand(certbotListCmd)
+        const domainLines = output
+            .split('\n')
+            .map((line) => line.trim())
+            .filter((line) => line.startsWith('Domains:'))
+        for (const line of domainLines) {
+            const domains = line.replace('Domains:', '').trim().split(/\s+/)
+            if (domains.includes(wildcard)) {
+                appendLog('certbot', `wildcard exists ${wildcard}, skip ${domain}`)
+                return true
+            }
+        }
+        return false
+    } catch (error) {
+        appendLog('certbot', `wildcard check failed: ${error instanceof Error ? error.message : String(error)}`)
+        return false
+    }
+}
+
 const applyCertbot = async (domain) => {
     const certbotCmd = process.env.CERTBOT_CMD
     if (!certbotCmd) {
         appendLog('certbot', `skip for ${domain}: CERTBOT_CMD not set`)
         return
     }
-    const command = certbotCmd.includes('{domain}') ? certbotCmd.replace('{domain}', domain) : `${certbotCmd} -d ${domain}`
+    const hasWildcard = await hasWildcardCertificate(domain)
+    if (hasWildcard) {
+        return
+    }
+    const acmeServer = process.env.ACME_SERVER
+    let command = certbotCmd.includes('{domain}') ? certbotCmd.replace('{domain}', domain) : `${certbotCmd} -d ${domain}`
+    if (acmeServer && !command.includes('--server')) {
+        command = `${command} --server ${acmeServer}`
+        appendLog('certbot', `acme server ${acmeServer}`)
+    }
     appendLog('certbot', `command ${command}`)
     try {
         await execCommand(command)
