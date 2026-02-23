@@ -1,4 +1,5 @@
 import { exec } from 'child_process'
+import dns from 'dns/promises'
 import dotenv from 'dotenv'
 import express from 'express'
 import fs from 'fs'
@@ -277,7 +278,7 @@ const isGlobalIPv6 = (ip) => {
     return true
 }
 
-const getServerIp = () => {
+const getServerIpCandidates = () => {
     const interfaces = os.networkInterfaces()
     const ipv6Global = []
     const ipv6Other = []
@@ -302,6 +303,11 @@ const getServerIp = () => {
             }
         }
     }
+    return { ipv6Global, ipv6Other, ipv4Public, ipv4Private }
+}
+
+const getServerIp = () => {
+    const { ipv6Global, ipv6Other, ipv4Public, ipv4Private } = getServerIpCandidates()
     if (ipv4Public.length > 0) return ipv4Public[0]
     if (ipv6Global.length > 0) return ipv6Global[0]
     if (ipv6Other.length > 0) return ipv6Other[0]
@@ -422,6 +428,35 @@ const listCertbotDomains = async () => {
     }
 }
 
+const resolveDomainIps = async (domain) => {
+    const ipv4 = []
+    const ipv6 = []
+    try {
+        const records4 = await dns.resolve4(domain)
+        ipv4.push(...records4)
+    } catch {
+    }
+    try {
+        const records6 = await dns.resolve6(domain)
+        ipv6.push(...records6)
+    } catch {
+    }
+    return { ipv4, ipv6 }
+}
+
+const isDnsPointingToServer = async (domain) => {
+    const { ipv4Public, ipv6Global } = getServerIpCandidates()
+    if (ipv4Public.length === 0 && ipv6Global.length === 0) {
+        return true
+    }
+    const serverIpv4 = new Set(ipv4Public)
+    const serverIpv6 = new Set(ipv6Global.map((ip) => normalizeIp(ip)))
+    const { ipv4, ipv6 } = await resolveDomainIps(domain)
+    const matchIpv4 = ipv4.some((ip) => serverIpv4.has(ip))
+    const matchIpv6 = ipv6.some((ip) => serverIpv6.has(normalizeIp(ip)))
+    return matchIpv4 || matchIpv6
+}
+
 const cleanValue = (value) => {
     if (!value) return ''
     return value.trim().replace(/^['"`]+|['"`]+$/g, '')
@@ -504,6 +539,12 @@ const applyCertbot = async (domain) => {
     if (!certbotCmd) {
         appendLog('certbot', `skip for ${domain}: CERTBOT_CMD not set`)
         updateCertStatus(domain, '无', { retryAt: null, retryCount: 0 })
+        return
+    }
+    const dnsOk = await isDnsPointingToServer(domain)
+    if (!dnsOk) {
+        appendLog('certbot', `skip for ${domain}: dns not pointing to server`)
+        scheduleCertRetry(domain)
         return
     }
     const hasWildcard = await hasWildcardCertificate(domain)
