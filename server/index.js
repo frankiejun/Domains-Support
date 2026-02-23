@@ -490,6 +490,43 @@ const updateCertStatus = (domain, status, options = {}) => {
     persistDb()
 }
 
+const formatLocalDateTime = (date) => {
+    const pad = (value) => String(value).padStart(2, '0')
+    const year = date.getFullYear()
+    const month = pad(date.getMonth() + 1)
+    const day = pad(date.getDate())
+    const hours = pad(date.getHours())
+    const minutes = pad(date.getMinutes())
+    const seconds = pad(date.getSeconds())
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
+}
+
+const parseRetryAt = (value) => {
+    if (!value) return null
+    if (typeof value === 'number') return value
+    if (typeof value === 'string') {
+        const trimmed = value.trim()
+        if (/^\d+$/.test(trimmed)) {
+            return Number(trimmed)
+        }
+        const localMatch = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(trimmed)
+        if (localMatch) {
+            const [, y, m, d, hh, mm, ss] = localMatch
+            return new Date(
+                Number(y),
+                Number(m) - 1,
+                Number(d),
+                Number(hh),
+                Number(mm),
+                Number(ss)
+            ).getTime()
+        }
+        const parsed = Date.parse(trimmed)
+        return Number.isNaN(parsed) ? null : parsed
+    }
+    return null
+}
+
 const getRetryDelayMinutes = (count) => {
     const base = 5
     const maxDelay = 360
@@ -501,20 +538,24 @@ const scheduleCertRetry = (domain) => {
     const row = readRow('SELECT cert_retry_count FROM domains WHERE domain = ?', [domain])
     const nextCount = (row?.cert_retry_count || 0) + 1
     const delayMinutes = getRetryDelayMinutes(nextCount)
-    const retryAt = new Date(Date.now() + delayMinutes * 60 * 1000).toISOString()
+    const retryAt = formatLocalDateTime(new Date(Date.now() + delayMinutes * 60 * 1000))
     updateCertStatus(domain, '失败', { retryAt, retryCount: nextCount })
     appendLog('certbot', `retry scheduled ${domain} ${delayMinutes}m`)
 }
 
 const processCertRetries = async () => {
-    const now = new Date().toISOString()
     const rows = readRows(`SELECT domain, site_id FROM domains
         WHERE service_type = '伪装网站'
         AND cert_status = '失败'
-        AND cert_retry_at IS NOT NULL
-        AND cert_retry_at <= ?`, [now])
+        AND cert_retry_at IS NOT NULL`)
     if (rows.length === 0) return
-    await runWithConcurrency(rows, 3, async (row) => {
+    const now = Date.now()
+    const dueRows = rows.filter((row) => {
+        const retryAt = parseRetryAt(row.cert_retry_at)
+        return retryAt !== null && retryAt <= now
+    })
+    if (dueRows.length === 0) return
+    await runWithConcurrency(dueRows, 3, async (row) => {
         if (!row.site_id) return
         runAsyncTask(`retry binding ${row.domain}`, () => applyWebsiteBinding(row.domain, row.site_id))
     })
@@ -543,7 +584,7 @@ const recoverPendingCerts = async () => {
         WHERE service_type = '伪装网站'
         AND cert_status = '申请中'`)
     if (rows.length === 0) return
-    const retryAt = new Date().toISOString()
+    const retryAt = formatLocalDateTime(new Date())
     let recovered = 0
     for (const row of rows) {
         const nextCount = (row.cert_retry_count || 0) + 1
