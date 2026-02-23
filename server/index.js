@@ -26,7 +26,7 @@ let db = null
 let autoCheckTimer = null
 let certRetryTimer = null
 const bindingInProgress = new Set()
-const certStatusSubscribers = new Set()
+const certStatusSubscribers = new Map()
 
 const ensureDir = () => {
     const dir = path.dirname(dbFilePath)
@@ -485,10 +485,11 @@ const runAsyncTask = (label, task) => {
 const notifyCertStatusChange = (payload) => {
     if (certStatusSubscribers.size === 0) return
     const data = `data: ${JSON.stringify(payload)}\n\n`
-    for (const res of certStatusSubscribers) {
+    for (const [res, timer] of certStatusSubscribers.entries()) {
         try {
             res.write(data)
         } catch {
+            clearInterval(timer)
             certStatusSubscribers.delete(res)
         }
     }
@@ -908,9 +909,21 @@ const startServer = async () => {
         res.setHeader('Content-Type', 'text/event-stream')
         res.setHeader('Cache-Control', 'no-cache')
         res.setHeader('Connection', 'keep-alive')
-        res.write('data: {"type":"connected"}\n\n')
-        certStatusSubscribers.add(res)
+        res.write('data: {"type":"cert_status_batch"}\n\n')
+        const pingTimer = setInterval(() => {
+            try {
+                res.write('event: ping\ndata: {}\n\n')
+            } catch {
+                clearInterval(pingTimer)
+                certStatusSubscribers.delete(res)
+            }
+        }, 25000)
+        certStatusSubscribers.set(res, pingTimer)
         req.on('close', () => {
+            const timer = certStatusSubscribers.get(res)
+            if (timer) {
+                clearInterval(timer)
+            }
             certStatusSubscribers.delete(res)
         })
     })

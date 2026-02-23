@@ -12,7 +12,6 @@
                         <el-dropdown-menu>
                             <el-dropdown-item @click="handleRefreshTable">刷新页面</el-dropdown-item>
                             <el-dropdown-item @click="handleRefreshStatus">检查域名状态</el-dropdown-item>
-                            <el-dropdown-item @click="handleRefreshCertStatus">检查证书状态</el-dropdown-item>
                         </el-dropdown-menu>
                     </template>
                 </el-dropdown>
@@ -224,8 +223,7 @@ const websiteConfigs = ref<WebsiteConfig[]>([])
 const serverIp = ref('')
 const refreshingTable = ref(false)
 const refreshingStatus = ref(false)
-const refreshingCertStatus = ref(false)
-const refreshLoading = computed(() => refreshingTable.value || refreshingStatus.value || refreshingCertStatus.value)
+const refreshLoading = computed(() => refreshingTable.value || refreshingStatus.value)
 const permanentExpiryDate = '2099-12-31'
 let certStatusSource: EventSource | null = null
 let certStatusReconnectTimer: number | null = null
@@ -696,48 +694,6 @@ const handleRefreshStatus = async (showMessage = true) => {
         }
     } finally {
         refreshingStatus.value = false
-    }
-}
-
-const handleRefreshCertStatus = async (showMessage = true) => {
-    if (refreshingCertStatus.value) return
-
-    try {
-        refreshingCertStatus.value = true
-        if (showMessage) {
-            ElMessage.info('正在检查证书状态...')
-        }
-        const authData = auth.getAuthToken()
-        if (!authData) {
-            throw new Error('未登录或登录已过期')
-        }
-        const response = await fetch('/api/domains/cert-sync', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${authData.token}`
-            }
-        })
-        if (response.status === 401) {
-            auth.clearAuth()
-            router.push({ name: 'Login' })
-            throw new Error('未授权访问')
-        }
-        const result = await response.json() as ApiResponse<Domain[]>
-        if (result.status !== 200) {
-            throw new Error(result.message || '检查失败')
-        }
-        domains.value = result.data || []
-        if (showMessage) {
-            ElMessage.success('证书状态刷新完成')
-        }
-    } catch (error: unknown) {
-        console.error('刷新证书状态失败:', error)
-        if (showMessage) {
-            ElMessage.error(error instanceof Error ? error.message : '刷新证书状态失败')
-        }
-    } finally {
-        refreshingCertStatus.value = false
     }
 }
 
