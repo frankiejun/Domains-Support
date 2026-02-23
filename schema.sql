@@ -10,6 +10,9 @@ CREATE TABLE IF NOT EXISTS domains (
     expiry_date TEXT NOT NULL,
     service_type TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT '离线',
+    cert_status TEXT NOT NULL DEFAULT '无',
+    cert_retry_count INTEGER DEFAULT 0,
+    cert_retry_at TEXT,
     tgsend  INTEGER DEFAULT 0,             --用于到期是否通知，0不通知，1通知。
     memo TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -42,3 +45,8 @@ CREATE TABLE IF NOT EXISTS websitecfg (
     filename TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+--v2.0.2
+ALTER TABLE domains ADD COLUMN cert_status TEXT NOT NULL DEFAULT '无';
+ALTER TABLE domains ADD COLUMN cert_retry_count INTEGER DEFAULT 0;
+ALTER TABLE domains ADD COLUMN cert_retry_at TEXT;
+update domains set cert_status = '无' where cert_status is null;

@@ -23,6 +23,8 @@ const logFilePath = process.env.OP_LOG_PATH || path.join(__dirname, '..', 'logs'
 let SQL = null
 let db = null
 let autoCheckTimer = null
+let certRetryTimer = null
+const bindingInProgress = new Set()
 
 const ensureDir = () => {
     const dir = path.dirname(dbFilePath)
@@ -83,6 +85,9 @@ const ensureSchema = () => {
         expiry_date TEXT NOT NULL,
         service_type TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT '离线',
+        cert_status TEXT NOT NULL DEFAULT '无',
+        cert_retry_count INTEGER DEFAULT 0,
+        cert_retry_at TEXT,
         tgsend INTEGER DEFAULT 0,
         st_tgsend INTEGER DEFAULT 1,
         site_id INTEGER,
@@ -111,6 +116,18 @@ const ensureSchema = () => {
     }
     if (!hasColumn('domains', 'site_id')) {
         run('ALTER TABLE domains ADD COLUMN site_id INTEGER')
+    }
+    if (!hasColumn('domains', 'cert_status')) {
+        run(`ALTER TABLE domains ADD COLUMN cert_status TEXT NOT NULL DEFAULT '无'`)
+    }
+    if (!hasColumn('domains', 'cert_retry_count')) {
+        run('ALTER TABLE domains ADD COLUMN cert_retry_count INTEGER DEFAULT 0')
+    }
+    if (!hasColumn('domains', 'cert_retry_at')) {
+        run('ALTER TABLE domains ADD COLUMN cert_retry_at TEXT')
+    }
+    if (hasColumn('domains', 'cert_status')) {
+        run(`UPDATE domains SET cert_status = '无' WHERE cert_status IS NULL`)
     }
     if (!hasColumn('alertcfg', 'wx_api')) {
         run('ALTER TABLE alertcfg ADD COLUMN wx_api TEXT')
@@ -285,8 +302,8 @@ const getServerIp = () => {
             }
         }
     }
-    if (ipv6Global.length > 0) return ipv6Global[0]
     if (ipv4Public.length > 0) return ipv4Public[0]
+    if (ipv6Global.length > 0) return ipv6Global[0]
     if (ipv6Other.length > 0) return ipv6Other[0]
     if (ipv4Private.length > 0) return ipv4Private[0]
     return '127.0.0.1'
@@ -396,14 +413,62 @@ const runAsyncTask = (label, task) => {
         })
 }
 
+const updateCertStatus = (domain, status, options = {}) => {
+    const fields = ['cert_status = ?']
+    const params = [status]
+    if ('retryAt' in options) {
+        fields.push('cert_retry_at = ?')
+        params.push(options.retryAt)
+    }
+    if ('retryCount' in options) {
+        fields.push('cert_retry_count = ?')
+        params.push(options.retryCount)
+    }
+    params.push(domain)
+    run(`UPDATE domains SET ${fields.join(', ')} WHERE domain = ?`, params)
+    persistDb()
+}
+
+const getRetryDelayMinutes = (count) => {
+    const base = 5
+    const maxDelay = 360
+    const delay = base * Math.pow(2, Math.max(0, count - 1))
+    return Math.min(maxDelay, delay)
+}
+
+const scheduleCertRetry = (domain) => {
+    const row = readRow('SELECT cert_retry_count FROM domains WHERE domain = ?', [domain])
+    const nextCount = (row?.cert_retry_count || 0) + 1
+    const delayMinutes = getRetryDelayMinutes(nextCount)
+    const retryAt = new Date(Date.now() + delayMinutes * 60 * 1000).toISOString()
+    updateCertStatus(domain, '失败', { retryAt, retryCount: nextCount })
+    appendLog('certbot', `retry scheduled ${domain} ${delayMinutes}m`)
+}
+
+const processCertRetries = async () => {
+    const now = new Date().toISOString()
+    const rows = readRows(`SELECT domain, site_id FROM domains
+        WHERE service_type = '伪装网站'
+        AND cert_status = '失败'
+        AND cert_retry_at IS NOT NULL
+        AND cert_retry_at <= ?`, [now])
+    if (rows.length === 0) return
+    await runWithConcurrency(rows, 3, async (row) => {
+        if (!row.site_id) return
+        runAsyncTask(`retry binding ${row.domain}`, () => applyWebsiteBinding(row.domain, row.site_id))
+    })
+}
+
 const applyCertbot = async (domain) => {
     const certbotCmd = process.env.CERTBOT_CMD
     if (!certbotCmd) {
         appendLog('certbot', `skip for ${domain}: CERTBOT_CMD not set`)
+        updateCertStatus(domain, '无', { retryAt: null, retryCount: 0 })
         return
     }
     const hasWildcard = await hasWildcardCertificate(domain)
     if (hasWildcard) {
+        updateCertStatus(domain, '成功', { retryAt: null, retryCount: 0 })
         return
     }
     const acmeServer = cleanValue(process.env.ACME_SERVER)
@@ -436,22 +501,35 @@ const applyCertbot = async (domain) => {
     appendLog('certbot', `command ${command}`)
     try {
         await execCommand(command)
+        updateCertStatus(domain, '成功', { retryAt: null, retryCount: 0 })
         appendLog('certbot', `success for ${domain}`)
     } catch (error) {
+        scheduleCertRetry(domain)
         appendLog('certbot', `failed for ${domain}: ${error instanceof Error ? error.message : String(error)}`)
         throw error
     }
 }
 
 const applyWebsiteBinding = async (domain, siteId) => {
+    if (bindingInProgress.has(domain)) {
+        appendLog('nginx', `skip binding ${domain}: in progress`)
+        return
+    }
+    bindingInProgress.add(domain)
     appendLog('nginx', `apply binding ${domain} site ${siteId}`)
     const site = readRow('SELECT * FROM websitecfg WHERE id = ?', [siteId])
     if (!site) {
         appendLog('nginx', `skip binding for ${domain}: site not found ${siteId}`)
+        bindingInProgress.delete(domain)
         return
     }
-    await writeNginxConfig(domain, site.filename)
-    await applyCertbot(domain)
+    updateCertStatus(domain, '申请中', { retryAt: null })
+    try {
+        await writeNginxConfig(domain, site.filename)
+        await applyCertbot(domain)
+    } finally {
+        bindingInProgress.delete(domain)
+    }
 }
 
 const removeWebsiteBinding = async (domain) => {
@@ -602,6 +680,14 @@ const startServer = async () => {
     ensureSchema()
     const initialConfig = readRow('SELECT * FROM alertcfg LIMIT 1')
     applyAutoCheckConfig(initialConfig)
+    if (certRetryTimer) {
+        clearInterval(certRetryTimer)
+        certRetryTimer = null
+    }
+    runAsyncTask('cert retry init', processCertRetries)
+    certRetryTimer = setInterval(() => {
+        runAsyncTask('cert retry tick', processCertRetries)
+    }, 60 * 1000)
     appendLog('system', `server start port ${port} log ${logFilePath}`)
 
     app.use(express.json({ limit: '5mb' }))
@@ -657,10 +743,12 @@ const startServer = async () => {
             if (data.service_type === '伪装网站' && !data.site_id) {
                 return res.status(400).json({ status: 400, message: '请选择网站', data: null })
             }
+            const initialCertStatus = data.service_type === '伪装网站' ? '申请中' : '无'
             run(`INSERT INTO domains (
                 domain, registrar, registrar_link, registrar_date,
-                expiry_date, service_type, status, tgsend, st_tgsend, site_id, memo
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                expiry_date, service_type, status, cert_status,
+                tgsend, st_tgsend, site_id, memo
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
                 data.domain,
                 data.registrar,
                 data.registrar_link || '',
@@ -668,6 +756,7 @@ const startServer = async () => {
                 data.expiry_date,
                 data.service_type,
                 data.status,
+                initialCertStatus,
                 data.tgsend ?? 1,
                 data.st_tgsend ?? 0,
                 data.site_id || null,
@@ -702,6 +791,18 @@ const startServer = async () => {
             if (!existing) {
                 return res.status(404).json({ status: 404, message: '域名不存在', data: null })
             }
+            let nextCertStatus = existing.cert_status || '无'
+            let nextRetryCount = existing.cert_retry_count || 0
+            let nextRetryAt = existing.cert_retry_at || null
+            if (data.service_type !== '伪装网站') {
+                nextCertStatus = '无'
+                nextRetryCount = 0
+                nextRetryAt = null
+            } else if (existing.service_type !== '伪装网站' || existing.domain !== data.domain || existing.site_id !== data.site_id) {
+                nextCertStatus = '申请中'
+                nextRetryCount = 0
+                nextRetryAt = null
+            }
             run(`UPDATE domains SET
                 domain = ?,
                 registrar = ?,
@@ -710,6 +811,9 @@ const startServer = async () => {
                 expiry_date = ?,
                 service_type = ?,
                 status = ?,
+                cert_status = ?,
+                cert_retry_count = ?,
+                cert_retry_at = ?,
                 tgsend = ?,
                 st_tgsend = ?,
                 site_id = ?,
@@ -722,6 +826,9 @@ const startServer = async () => {
                 data.expiry_date,
                 data.service_type,
                 data.status,
+                nextCertStatus,
+                nextRetryCount,
+                nextRetryAt,
                 data.tgsend || 0,
                 data.st_tgsend ?? 1,
                 data.service_type === '伪装网站' ? data.site_id : null,
@@ -798,7 +905,7 @@ const startServer = async () => {
 
     app.get('/api/domains/export', (req, res) => {
         try {
-            const rows = readRows('SELECT domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, memo, tgsend, st_tgsend, site_id FROM domains')
+            const rows = readRows('SELECT domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, cert_status, memo, tgsend, st_tgsend, site_id FROM domains')
             const filename = `domains-export-${new Date().toISOString().split('T')[0]}.json`
             res.setHeader('Content-Type', 'application/json')
             res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
@@ -840,6 +947,7 @@ const startServer = async () => {
                     if (!domain.domain) {
                         throw new Error('域名字段缺失')
                     }
+                    const importCertStatus = domain.cert_status || (domain.service_type === '伪装网站' ? '申请中' : '无')
                     const existing = readRow('SELECT id FROM domains WHERE domain = ?', [domain.domain])
                     if (existing) {
                         run(`UPDATE domains SET 
@@ -849,6 +957,7 @@ const startServer = async () => {
                             expiry_date = ?, 
                             service_type = ?, 
                             status = ?, 
+                            cert_status = ?,
                             memo = ?, 
                             tgsend = ?, 
                             st_tgsend = ?,
@@ -860,6 +969,7 @@ const startServer = async () => {
                             domain.expiry_date || '',
                             domain.service_type || '',
                             domain.status || '离线',
+                            importCertStatus,
                             domain.memo || '',
                             domain.tgsend || 0,
                             domain.st_tgsend || 0,
@@ -868,8 +978,8 @@ const startServer = async () => {
                         ])
                     } else {
                         run(`INSERT INTO domains 
-                            (domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, memo, tgsend, st_tgsend, site_id)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                            (domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, cert_status, memo, tgsend, st_tgsend, site_id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
                             domain.domain,
                             domain.registrar || '',
                             domain.registrar_link || '',
@@ -877,6 +987,7 @@ const startServer = async () => {
                             domain.expiry_date || '',
                             domain.service_type || '',
                             domain.status || '离线',
+                            importCertStatus,
                             domain.memo || '',
                             domain.tgsend || 0,
                             domain.st_tgsend || 0,
@@ -1122,11 +1233,13 @@ const startServer = async () => {
             }
             const existing = readRow('SELECT id FROM domains WHERE domain = ?', [data.domain])
             if (existing) {
+                const nextCertStatus = data.cert_status || (data.service_type === '伪装网站' ? '申请中' : '无')
                 run(`UPDATE domains 
-                    SET service_type = ?, status = ?, memo = ?
+                    SET service_type = ?, status = ?, cert_status = ?, memo = ?
                     WHERE domain = ?`, [
                     data.service_type,
                     data.status,
+                    nextCertStatus,
                     data.memo,
                     data.domain
                 ])
@@ -1134,10 +1247,11 @@ const startServer = async () => {
                 persistDb()
                 return res.json({ status: 200, message: '更新成功', data: updatedDomain })
             }
+            const initialCertStatus = data.cert_status || (data.service_type === '伪装网站' ? '申请中' : '无')
             run(`INSERT INTO domains (
                 domain, registrar, registrar_link, registrar_date,
-                expiry_date, service_type, status, tgsend, st_tgsend, memo
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                expiry_date, service_type, status, cert_status, tgsend, st_tgsend, memo
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
                 data.domain,
                 data.registrar,
                 data.registrar_link || '',
@@ -1145,6 +1259,7 @@ const startServer = async () => {
                 data.expiry_date,
                 data.service_type,
                 data.status,
+                initialCertStatus,
                 data.tgsend ?? 1,
                 data.st_tgsend ?? 0,
                 data.memo || ''

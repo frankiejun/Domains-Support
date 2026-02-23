@@ -106,6 +106,17 @@
                 </template>
             </el-table-column>
             <el-table-column prop="service_type" label="服务类型" align="center" sortable />
+            <el-table-column prop="cert_status" label="证书状态" align="center" sortable>
+                <template #default="scope">
+                    <span :class="{
+                        'success-text': scope.row.cert_status === '成功',
+                        'warning-text': scope.row.cert_status === '申请中',
+                        'danger-text': scope.row.cert_status === '失败'
+                    }">
+                        {{ scope.row.cert_status || '无' }}
+                    </span>
+                </template>
+            </el-table-column>
             <el-table-column prop="status" label="状态" align="center" sortable>
                 <template #default="scope">
                     <span :class="scope.row.status === '在线' ? 'success-text' : 'danger-text'">

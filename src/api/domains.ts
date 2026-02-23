@@ -9,6 +9,9 @@ export interface DomainData {
     expiry_date: string
     service_type: string
     status: string
+    cert_status?: '申请中' | '成功' | '失败' | '无'
+    cert_retry_count?: number
+    cert_retry_at?: string | null
     tgsend: number
     st_tgsend: number
     site_id?: number | null
