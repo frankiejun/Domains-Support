@@ -294,9 +294,15 @@ const getServerIp = () => {
 
 const writeNginxConfig = async (domain, filename) => {
     const nginxSitesDir = process.env.NGINX_SITES_DIR
-    if (!nginxSitesDir) return
+    if (!nginxSitesDir) {
+        appendLog('nginx', `skip write config for ${domain}: NGINX_SITES_DIR not set`)
+        return
+    }
     const resolved = resolveWebsiteRoot(filename)
-    if (!resolved) return
+    if (!resolved) {
+        appendLog('nginx', `skip write config for ${domain}: website file missing ${filename}`)
+        return
+    }
     if (!fs.existsSync(nginxSitesDir)) {
         fs.mkdirSync(nginxSitesDir, { recursive: true })
     }
@@ -319,12 +325,17 @@ const writeNginxConfig = async (domain, filename) => {
     if (reloadCmd) {
         appendLog('nginx', `reload command ${reloadCmd}`)
         await execCommand(reloadCmd)
+    } else {
+        appendLog('nginx', 'reload skipped: NGINX_RELOAD_CMD not set')
     }
 }
 
 const removeNginxConfig = async (domain) => {
     const nginxSitesDir = process.env.NGINX_SITES_DIR
-    if (!nginxSitesDir) return
+    if (!nginxSitesDir) {
+        appendLog('nginx', `skip remove config for ${domain}: NGINX_SITES_DIR not set`)
+        return
+    }
     const configPath = path.join(nginxSitesDir, `${domain}.conf`)
     if (fs.existsSync(configPath)) {
         fs.unlinkSync(configPath)
@@ -334,12 +345,17 @@ const removeNginxConfig = async (domain) => {
     if (reloadCmd) {
         appendLog('nginx', `reload command ${reloadCmd}`)
         await execCommand(reloadCmd)
+    } else {
+        appendLog('nginx', 'reload skipped: NGINX_RELOAD_CMD not set')
     }
 }
 
 const applyCertbot = async (domain) => {
     const certbotCmd = process.env.CERTBOT_CMD
-    if (!certbotCmd) return
+    if (!certbotCmd) {
+        appendLog('certbot', `skip for ${domain}: CERTBOT_CMD not set`)
+        return
+    }
     const command = certbotCmd.includes('{domain}') ? certbotCmd.replace('{domain}', domain) : `${certbotCmd} -d ${domain}`
     appendLog('certbot', `command ${command}`)
     try {
@@ -352,13 +368,18 @@ const applyCertbot = async (domain) => {
 }
 
 const applyWebsiteBinding = async (domain, siteId) => {
+    appendLog('nginx', `apply binding ${domain} site ${siteId}`)
     const site = readRow('SELECT * FROM websitecfg WHERE id = ?', [siteId])
-    if (!site) return
+    if (!site) {
+        appendLog('nginx', `skip binding for ${domain}: site not found ${siteId}`)
+        return
+    }
     await writeNginxConfig(domain, site.filename)
     await applyCertbot(domain)
 }
 
 const removeWebsiteBinding = async (domain) => {
+    appendLog('nginx', `remove binding ${domain}`)
     await removeNginxConfig(domain)
 }
 
@@ -505,6 +526,7 @@ const startServer = async () => {
     ensureSchema()
     const initialConfig = readRow('SELECT * FROM alertcfg LIMIT 1')
     applyAutoCheckConfig(initialConfig)
+    appendLog('system', `server start port ${port} log ${logFilePath}`)
 
     app.use(express.json({ limit: '5mb' }))
 
