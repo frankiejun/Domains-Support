@@ -534,6 +534,23 @@ const syncCertStatusFromCertbot = async () => {
     }
 }
 
+const recoverPendingCerts = async () => {
+    const rows = readRows(`SELECT domain, cert_retry_count FROM domains
+        WHERE service_type = '伪装网站'
+        AND cert_status = '申请中'`)
+    if (rows.length === 0) return
+    const retryAt = new Date().toISOString()
+    let recovered = 0
+    for (const row of rows) {
+        const nextCount = (row.cert_retry_count || 0) + 1
+        updateCertStatus(row.domain, '失败', { retryAt, retryCount: nextCount })
+        recovered += 1
+    }
+    if (recovered > 0) {
+        appendLog('certbot', `pending certs recovered ${recovered}`)
+    }
+}
+
 const applyCertbot = async (domain) => {
     const certbotCmd = process.env.CERTBOT_CMD
     if (!certbotCmd) {
@@ -762,6 +779,7 @@ const startServer = async () => {
     const initialConfig = readRow('SELECT * FROM alertcfg LIMIT 1')
     applyAutoCheckConfig(initialConfig)
     runAsyncTask('cert status sync', syncCertStatusFromCertbot)
+    runAsyncTask('cert pending recover', recoverPendingCerts)
     if (certRetryTimer) {
         clearInterval(certRetryTimer)
         certRetryTimer = null
