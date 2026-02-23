@@ -383,6 +383,11 @@ const hasWildcardCertificate = async (domain) => {
     }
 }
 
+const cleanValue = (value) => {
+    if (!value) return ''
+    return value.trim().replace(/^['"`]+|['"`]+$/g, '')
+}
+
 const applyCertbot = async (domain) => {
     const certbotCmd = process.env.CERTBOT_CMD
     if (!certbotCmd) {
@@ -393,11 +398,17 @@ const applyCertbot = async (domain) => {
     if (hasWildcard) {
         return
     }
-    const acmeServer = process.env.ACME_SERVER
+    const acmeServer = cleanValue(process.env.ACME_SERVER)
+    const eabKid = cleanValue(process.env.ACME_EAB_KID)
+    const eabHmacKey = cleanValue(process.env.ACME_EAB_HMAC_KEY)
     let command = certbotCmd.includes('{domain}') ? certbotCmd.replace('{domain}', domain) : `${certbotCmd} -d ${domain}`
     if (acmeServer && !command.includes('--server')) {
         command = `${command} --server ${acmeServer}`
         appendLog('certbot', `acme server ${acmeServer}`)
+    }
+    if (eabKid && eabHmacKey && !command.includes('--eab-kid') && !command.includes('--eab-hmac-key')) {
+        command = `${command} --eab-kid ${eabKid} --eab-hmac-key ${eabHmacKey}`
+        appendLog('certbot', 'eab enabled')
     }
     appendLog('certbot', `command ${command}`)
     try {
