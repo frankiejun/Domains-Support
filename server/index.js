@@ -18,6 +18,7 @@ const upload = multer()
 
 const port = Number(process.env.PORT || 3000)
 const dbFilePath = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'domains.sqlite')
+const logFilePath = process.env.OP_LOG_PATH || path.join(__dirname, '..', 'logs', 'backend.log')
 
 let SQL = null
 let db = null
@@ -36,6 +37,18 @@ const persistDb = () => {
     const data = db.export()
     const buffer = Buffer.from(data)
     fs.writeFileSync(dbFilePath, buffer)
+}
+
+const appendLog = (type, message) => {
+    try {
+        const dir = path.dirname(logFilePath)
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true })
+        }
+        const timestamp = new Date().toISOString()
+        fs.appendFileSync(logFilePath, `[${timestamp}] [${type}] ${message}\n`)
+    } catch {
+    }
 }
 
 const readRows = (sql, params = []) => {
@@ -110,6 +123,20 @@ const ensureSchema = () => {
     }
     if (!hasColumn('alertcfg', 'auto_check_interval')) {
         run('ALTER TABLE alertcfg ADD COLUMN auto_check_interval INTEGER DEFAULT 30')
+    }
+    const websiteCount = readRow('SELECT COUNT(*) AS count FROM websitecfg')
+    if (!websiteCount || websiteCount.count === 0) {
+        const defaults = [
+            { name: '樱花博客', filename: 'sakura.html' },
+            { name: '圣诞贺卡', filename: 'christmas.html' },
+            { name: '李明的简历', filename: 'resume.html' },
+            { name: '人力资源网站', filename: 'hr.html' },
+            { name: '游戏门户', filename: 'game.html' },
+            { name: '德一教育', filename: 'deyiedu.html' }
+        ]
+        for (const item of defaults) {
+            run('INSERT INTO websitecfg (name, filename) VALUES (?, ?)', [item.name, item.filename])
+        }
     }
     persistDb()
 }
@@ -215,15 +242,53 @@ const resolveWebsiteRoot = (filename) => {
     return { root: dir, index: filename }
 }
 
+const normalizeIp = (address) => address.split('%')[0].toLowerCase()
+
+const isPrivateIPv4 = (ip) => {
+    return ip.startsWith('10.')
+        || ip.startsWith('127.')
+        || ip.startsWith('169.254.')
+        || ip.startsWith('192.168.')
+        || /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)
+}
+
+const isGlobalIPv6 = (ip) => {
+    if (ip === '::' || ip === '::1') return false
+    if (ip.startsWith('fe80')) return false
+    if (ip.startsWith('fc') || ip.startsWith('fd')) return false
+    if (ip.startsWith('ff')) return false
+    return true
+}
+
 const getServerIp = () => {
     const interfaces = os.networkInterfaces()
+    const ipv6Global = []
+    const ipv6Other = []
+    const ipv4Public = []
+    const ipv4Private = []
     for (const name of Object.keys(interfaces)) {
         for (const net of interfaces[name] || []) {
-            if (net.family === 'IPv4' && !net.internal) {
-                return net.address
+            if (net.internal) continue
+            const address = normalizeIp(net.address)
+            if (net.family === 'IPv6') {
+                if (isGlobalIPv6(address)) {
+                    ipv6Global.push(address)
+                } else {
+                    ipv6Other.push(address)
+                }
+            } else if (net.family === 'IPv4') {
+                if (isPrivateIPv4(address)) {
+                    ipv4Private.push(address)
+                } else if (address !== '0.0.0.0') {
+                    ipv4Public.push(address)
+                }
             }
         }
     }
+    if (ipv6Global.length > 0) return ipv6Global[0]
+    if (ipv4Public.length > 0) return ipv4Public[0]
+    if (ipv6Other.length > 0) return ipv6Other[0]
+    if (ipv4Private.length > 0) return ipv4Private[0]
     return '127.0.0.1'
 }
 
@@ -249,8 +314,10 @@ const writeNginxConfig = async (domain, filename) => {
     ].join('\n')
     const configPath = path.join(nginxSitesDir, `${domain}.conf`)
     fs.writeFileSync(configPath, config)
+    appendLog('nginx', `write config ${configPath} for ${domain}`)
     const reloadCmd = process.env.NGINX_RELOAD_CMD
     if (reloadCmd) {
+        appendLog('nginx', `reload command ${reloadCmd}`)
         await execCommand(reloadCmd)
     }
 }
@@ -261,9 +328,11 @@ const removeNginxConfig = async (domain) => {
     const configPath = path.join(nginxSitesDir, `${domain}.conf`)
     if (fs.existsSync(configPath)) {
         fs.unlinkSync(configPath)
+        appendLog('nginx', `remove config ${configPath} for ${domain}`)
     }
     const reloadCmd = process.env.NGINX_RELOAD_CMD
     if (reloadCmd) {
+        appendLog('nginx', `reload command ${reloadCmd}`)
         await execCommand(reloadCmd)
     }
 }
@@ -272,7 +341,14 @@ const applyCertbot = async (domain) => {
     const certbotCmd = process.env.CERTBOT_CMD
     if (!certbotCmd) return
     const command = certbotCmd.includes('{domain}') ? certbotCmd.replace('{domain}', domain) : `${certbotCmd} -d ${domain}`
-    await execCommand(command)
+    appendLog('certbot', `command ${command}`)
+    try {
+        await execCommand(command)
+        appendLog('certbot', `success for ${domain}`)
+    } catch (error) {
+        appendLog('certbot', `failed for ${domain}: ${error instanceof Error ? error.message : String(error)}`)
+        throw error
+    }
 }
 
 const applyWebsiteBinding = async (domain, siteId) => {
