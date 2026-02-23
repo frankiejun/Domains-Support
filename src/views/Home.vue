@@ -226,8 +226,6 @@ const refreshingStatus = ref(false)
 const refreshLoading = computed(() => refreshingTable.value || refreshingStatus.value)
 const permanentExpiryDate = '2099-12-31'
 let certStatusSource: EventSource | null = null
-let certStatusReconnectTimer: number | null = null
-let certStatusRefreshTimer: number | null = null
 
 // 搜索和分页状态
 const searchQuery = ref('')
@@ -697,14 +695,6 @@ const handleRefreshStatus = async (showMessage = true) => {
     }
 }
 
-const scheduleCertStatusRefresh = () => {
-    if (certStatusRefreshTimer) return
-    certStatusRefreshTimer = window.setTimeout(async () => {
-        certStatusRefreshTimer = null
-        await loadDomains(false)
-    }, 300)
-}
-
 const connectCertStatusStream = () => {
     if (certStatusSource) return
     const authData = auth.getAuthToken()
@@ -712,22 +702,8 @@ const connectCertStatusStream = () => {
     const url = `/api/events/cert-status?token=${encodeURIComponent(authData.token)}`
     const source = new EventSource(url)
     certStatusSource = source
-    source.onopen = () => {
-        scheduleCertStatusRefresh()
-    }
     source.onmessage = () => {
-        scheduleCertStatusRefresh()
-    }
-    source.onerror = () => {
-        if (certStatusSource) {
-            certStatusSource.close()
-            certStatusSource = null
-        }
-        if (certStatusReconnectTimer) return
-        certStatusReconnectTimer = window.setTimeout(() => {
-            certStatusReconnectTimer = null
-            connectCertStatusStream()
-        }, 3000)
+        loadDomains(false)
     }
 }
 
@@ -735,14 +711,6 @@ const stopCertStatusStream = () => {
     if (certStatusSource) {
         certStatusSource.close()
         certStatusSource = null
-    }
-    if (certStatusReconnectTimer) {
-        clearTimeout(certStatusReconnectTimer)
-        certStatusReconnectTimer = null
-    }
-    if (certStatusRefreshTimer) {
-        clearTimeout(certStatusRefreshTimer)
-        certStatusRefreshTimer = null
     }
 }
 

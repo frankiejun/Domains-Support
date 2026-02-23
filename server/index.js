@@ -26,7 +26,7 @@ let db = null
 let autoCheckTimer = null
 let certRetryTimer = null
 const bindingInProgress = new Set()
-const certStatusSubscribers = new Map()
+const certStatusSubscribers = new Set()
 
 const ensureDir = () => {
     const dir = path.dirname(dbFilePath)
@@ -487,14 +487,10 @@ const runAsyncTask = (label, task) => {
 const notifyCertStatusChange = (payload) => {
     if (certStatusSubscribers.size === 0) return
     const data = `data: ${JSON.stringify(payload)}\n\n`
-    for (const [res, timer] of certStatusSubscribers.entries()) {
+    for (const res of certStatusSubscribers) {
         try {
             res.write(data)
-            if (typeof res.flush === 'function') {
-                res.flush()
-            }
         } catch {
-            clearInterval(timer)
             certStatusSubscribers.delete(res)
         }
     }
@@ -912,7 +908,7 @@ const startServer = async () => {
 
     app.get('/api/events/cert-status', (req, res) => {
         res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
-        res.setHeader('Cache-Control', 'no-cache, no-transform')
+        res.setHeader('Cache-Control', 'no-cache')
         res.setHeader('Connection', 'keep-alive')
         res.setHeader('X-Accel-Buffering', 'no')
         if (typeof res.flushHeaders === 'function') {
@@ -921,28 +917,18 @@ const startServer = async () => {
         if (res.socket && typeof res.socket.setTimeout === 'function') {
             res.socket.setTimeout(0)
         }
-        if (res.socket && typeof res.socket.setNoDelay === 'function') {
-            res.socket.setNoDelay(true)
-        }
-        res.write(':ok\n\n')
-        res.write('data: {"type":"cert_status_batch"}\n\n')
+        res.write('data: {"type":"connected"}\n\n')
         const pingTimer = setInterval(() => {
             try {
                 res.write('event: ping\ndata: {}\n\n')
-                if (typeof res.flush === 'function') {
-                    res.flush()
-                }
             } catch {
                 clearInterval(pingTimer)
                 certStatusSubscribers.delete(res)
             }
         }, 25000)
-        certStatusSubscribers.set(res, pingTimer)
+        certStatusSubscribers.add(res)
         req.on('close', () => {
-            const timer = certStatusSubscribers.get(res)
-            if (timer) {
-                clearInterval(timer)
-            }
+            clearInterval(pingTimer)
             certStatusSubscribers.delete(res)
         })
     })
