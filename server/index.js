@@ -490,6 +490,9 @@ const notifyCertStatusChange = (payload) => {
     for (const [res, timer] of certStatusSubscribers.entries()) {
         try {
             res.write(data)
+            if (typeof res.flush === 'function') {
+                res.flush()
+            }
         } catch {
             clearInterval(timer)
             certStatusSubscribers.delete(res)
@@ -908,19 +911,27 @@ const startServer = async () => {
     })
 
     app.get('/api/events/cert-status', (req, res) => {
-        res.setHeader('Content-Type', 'text/event-stream')
-        res.setHeader('Cache-Control', 'no-cache')
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+        res.setHeader('Cache-Control', 'no-cache, no-transform')
         res.setHeader('Connection', 'keep-alive')
+        res.setHeader('X-Accel-Buffering', 'no')
         if (typeof res.flushHeaders === 'function') {
             res.flushHeaders()
         }
         if (res.socket && typeof res.socket.setTimeout === 'function') {
             res.socket.setTimeout(0)
         }
+        if (res.socket && typeof res.socket.setNoDelay === 'function') {
+            res.socket.setNoDelay(true)
+        }
+        res.write(':ok\n\n')
         res.write('data: {"type":"cert_status_batch"}\n\n')
         const pingTimer = setInterval(() => {
             try {
                 res.write('event: ping\ndata: {}\n\n')
+                if (typeof res.flush === 'function') {
+                    res.flush()
+                }
             } catch {
                 clearInterval(pingTimer)
                 certStatusSubscribers.delete(res)
