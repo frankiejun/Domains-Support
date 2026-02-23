@@ -12,6 +12,7 @@
                         <el-dropdown-menu>
                             <el-dropdown-item @click="handleRefreshTable">刷新页面</el-dropdown-item>
                             <el-dropdown-item @click="handleRefreshStatus">检查域名状态</el-dropdown-item>
+                            <el-dropdown-item @click="handleRefreshCertStatus">检查证书状态</el-dropdown-item>
                         </el-dropdown-menu>
                     </template>
                 </el-dropdown>
@@ -183,7 +184,7 @@
 <script setup lang="ts">
 import { ArrowDown, CopyDocument, Delete, Download, Edit, Moon, Plus, Refresh, Search, Setting, Sunny, SwitchButton, Upload } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { createDomain, deleteDomain, updateDomain, type DomainData } from '../api/domains'
 import AlertConfigDialog from '../components/AlertConfigDialog.vue'
@@ -223,8 +224,12 @@ const websiteConfigs = ref<WebsiteConfig[]>([])
 const serverIp = ref('')
 const refreshingTable = ref(false)
 const refreshingStatus = ref(false)
-const refreshLoading = computed(() => refreshingTable.value || refreshingStatus.value)
+const refreshingCertStatus = ref(false)
+const refreshLoading = computed(() => refreshingTable.value || refreshingStatus.value || refreshingCertStatus.value)
 const permanentExpiryDate = '2099-12-31'
+let certStatusSource: EventSource | null = null
+let certStatusReconnectTimer: number | null = null
+let certStatusRefreshTimer: number | null = null
 
 // 搜索和分页状态
 const searchQuery = ref('')
@@ -531,7 +536,7 @@ const handleDialogSubmit = async (formData: Omit<Domain, 'id' | 'created_at'>) =
     }
 }
 
-const loadDomains = async () => {
+const loadDomains = async (showError = true) => {
     try {
         console.log('开始加载域名列表')
         const authData = auth.getAuthToken()
@@ -567,7 +572,9 @@ const loadDomains = async () => {
             message: error.message,
             stack: error.stack
         })
-        ElMessage.error(error.message || '加载域名列表失败')
+        if (showError) {
+            ElMessage.error(error.message || '加载域名列表失败')
+        }
         if (error.message === '未授权访问' || error.message === '无效的访问令牌') {
             auth.clearAuth()
             router.push({ name: 'Login' })
@@ -641,7 +648,7 @@ const handleRefreshTable = async () => {
 
     try {
         refreshingTable.value = true
-        await loadDomains()
+        await loadDomains(true)
     } catch (error: unknown) {
         console.error('刷新表格失败:', error)
         ElMessage.error(error instanceof Error ? error.message : '刷新表格失败')
@@ -689,6 +696,94 @@ const handleRefreshStatus = async (showMessage = true) => {
         }
     } finally {
         refreshingStatus.value = false
+    }
+}
+
+const handleRefreshCertStatus = async (showMessage = true) => {
+    if (refreshingCertStatus.value) return
+
+    try {
+        refreshingCertStatus.value = true
+        if (showMessage) {
+            ElMessage.info('正在检查证书状态...')
+        }
+        const authData = auth.getAuthToken()
+        if (!authData) {
+            throw new Error('未登录或登录已过期')
+        }
+        const response = await fetch('/api/domains/cert-sync', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authData.token}`
+            }
+        })
+        if (response.status === 401) {
+            auth.clearAuth()
+            router.push({ name: 'Login' })
+            throw new Error('未授权访问')
+        }
+        const result = await response.json() as ApiResponse<Domain[]>
+        if (result.status !== 200) {
+            throw new Error(result.message || '检查失败')
+        }
+        domains.value = result.data || []
+        if (showMessage) {
+            ElMessage.success('证书状态刷新完成')
+        }
+    } catch (error: unknown) {
+        console.error('刷新证书状态失败:', error)
+        if (showMessage) {
+            ElMessage.error(error instanceof Error ? error.message : '刷新证书状态失败')
+        }
+    } finally {
+        refreshingCertStatus.value = false
+    }
+}
+
+const scheduleCertStatusRefresh = () => {
+    if (certStatusRefreshTimer) return
+    certStatusRefreshTimer = window.setTimeout(async () => {
+        certStatusRefreshTimer = null
+        await loadDomains(false)
+    }, 300)
+}
+
+const connectCertStatusStream = () => {
+    if (certStatusSource) return
+    const authData = auth.getAuthToken()
+    if (!authData) return
+    const url = `/api/events/cert-status?token=${encodeURIComponent(authData.token)}`
+    const source = new EventSource(url)
+    certStatusSource = source
+    source.onmessage = () => {
+        scheduleCertStatusRefresh()
+    }
+    source.onerror = () => {
+        if (certStatusSource) {
+            certStatusSource.close()
+            certStatusSource = null
+        }
+        if (certStatusReconnectTimer) return
+        certStatusReconnectTimer = window.setTimeout(() => {
+            certStatusReconnectTimer = null
+            connectCertStatusStream()
+        }, 3000)
+    }
+}
+
+const stopCertStatusStream = () => {
+    if (certStatusSource) {
+        certStatusSource.close()
+        certStatusSource = null
+    }
+    if (certStatusReconnectTimer) {
+        clearTimeout(certStatusReconnectTimer)
+        certStatusReconnectTimer = null
+    }
+    if (certStatusRefreshTimer) {
+        clearTimeout(certStatusRefreshTimer)
+        certStatusRefreshTimer = null
     }
 }
 
@@ -855,6 +950,11 @@ onMounted(() => {
     loadAlertConfig()
     loadWebsiteConfigs()
     loadServerIp()
+    connectCertStatusStream()
+})
+
+onBeforeUnmount(() => {
+    stopCertStatusStream()
 })
 </script>
 

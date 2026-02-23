@@ -26,6 +26,7 @@ let db = null
 let autoCheckTimer = null
 let certRetryTimer = null
 const bindingInProgress = new Set()
+const certStatusSubscribers = new Set()
 
 const ensureDir = () => {
     const dir = path.dirname(dbFilePath)
@@ -165,8 +166,15 @@ const getBearerToken = (req) => {
     return authHeader.replace('Bearer ', '').trim()
 }
 
+const getAuthToken = (req) => {
+    const headerToken = getBearerToken(req)
+    if (headerToken) return headerToken
+    if (typeof req.query.token === 'string') return req.query.token
+    return null
+}
+
 const requireAuth = (req, res, next) => {
-    const token = getBearerToken(req)
+    const token = getAuthToken(req)
     if (!token) {
         return res.status(401).json({ status: 401, message: '未授权访问', data: null })
     }
@@ -474,6 +482,18 @@ const runAsyncTask = (label, task) => {
         })
 }
 
+const notifyCertStatusChange = (payload) => {
+    if (certStatusSubscribers.size === 0) return
+    const data = `data: ${JSON.stringify(payload)}\n\n`
+    for (const res of certStatusSubscribers) {
+        try {
+            res.write(data)
+        } catch {
+            certStatusSubscribers.delete(res)
+        }
+    }
+}
+
 const updateCertStatus = (domain, status, options = {}) => {
     const fields = ['cert_status = ?']
     const params = [status]
@@ -488,6 +508,7 @@ const updateCertStatus = (domain, status, options = {}) => {
     params.push(domain)
     run(`UPDATE domains SET ${fields.join(', ')} WHERE domain = ?`, params)
     persistDb()
+    notifyCertStatusChange({ type: 'cert_status_updated', domain, status })
 }
 
 const formatLocalDateTime = (date) => {
@@ -577,6 +598,11 @@ const syncCertStatusFromCertbot = async () => {
     if (updatedCount > 0) {
         appendLog('certbot', `cert status sync updated ${updatedCount}`)
     }
+}
+
+const syncCertStatusAndFetchDomains = async () => {
+    await syncCertStatusFromCertbot()
+    return readRows('SELECT * FROM domains ORDER BY created_at DESC')
 }
 
 const recoverPendingCerts = async () => {
@@ -878,6 +904,17 @@ const startServer = async () => {
         }
     })
 
+    app.get('/api/events/cert-status', (req, res) => {
+        res.setHeader('Content-Type', 'text/event-stream')
+        res.setHeader('Cache-Control', 'no-cache')
+        res.setHeader('Connection', 'keep-alive')
+        res.write('data: {"type":"connected"}\n\n')
+        certStatusSubscribers.add(res)
+        req.on('close', () => {
+            certStatusSubscribers.delete(res)
+        })
+    })
+
     app.post('/api/domains', async (req, res) => {
         try {
             const data = req.body || {}
@@ -912,6 +949,7 @@ const startServer = async () => {
             const created = readRow('SELECT * FROM domains WHERE id = last_insert_rowid()')
             persistDb()
             res.json({ status: 200, message: '创建成功', data: created })
+            notifyCertStatusChange({ type: 'cert_status_updated', domain: data.domain, status: initialCertStatus })
             if (data.service_type === '伪装网站' && data.site_id) {
                 runAsyncTask(`apply binding ${data.domain}`, () => applyWebsiteBinding(data.domain, data.site_id))
             }
@@ -985,6 +1023,9 @@ const startServer = async () => {
             const updated = readRow('SELECT * FROM domains WHERE id = ?', [id])
             persistDb()
             res.json({ status: 200, message: '更新成功', data: updated })
+            if (existing.cert_status !== nextCertStatus) {
+                notifyCertStatusChange({ type: 'cert_status_updated', domain: data.domain, status: nextCertStatus })
+            }
             if (existing.service_type === '伪装网站' && data.service_type !== '伪装网站') {
                 runAsyncTask(`remove binding ${existing.domain}`, () => removeWebsiteBinding(existing.domain))
             }
@@ -1050,6 +1091,15 @@ const startServer = async () => {
         }
     })
 
+    app.post('/api/domains/cert-sync', async (_req, res) => {
+        try {
+            const updatedDomains = await syncCertStatusAndFetchDomains()
+            return res.json({ status: 200, message: '检查完成', data: updatedDomains })
+        } catch (error) {
+            return res.status(500).json({ status: 500, message: error instanceof Error ? error.message : '检查失败', data: null })
+        }
+    })
+
     app.get('/api/domains/export', (req, res) => {
         try {
             const rows = readRows('SELECT domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, cert_status, memo, tgsend, st_tgsend, site_id FROM domains')
@@ -1089,6 +1139,7 @@ const startServer = async () => {
                 }
             }
             const results = { total: domains.length, success: 0, failed: 0, errors: [] }
+            let shouldNotifyCertStatus = false
             for (const domain of domains) {
                 try {
                     if (!domain.domain) {
@@ -1141,6 +1192,7 @@ const startServer = async () => {
                             domain.site_id || null
                         ])
                     }
+                    shouldNotifyCertStatus = true
                     results.success += 1
                 } catch (error) {
                     results.failed += 1
@@ -1151,6 +1203,9 @@ const startServer = async () => {
                 }
             }
             persistDb()
+            if (shouldNotifyCertStatus) {
+                notifyCertStatusChange({ type: 'cert_status_batch' })
+            }
             return res.json({ status: 200, message: `导入完成: ${results.success} 成功, ${results.failed} 失败`, data: results })
         } catch (error) {
             return res.status(500).json({ status: 500, message: '导入数据失败: ' + (error instanceof Error ? error.message : ''), data: null })
@@ -1378,7 +1433,7 @@ const startServer = async () => {
             if (!dateRegex.test(data.registrar_date) || !dateRegex.test(data.expiry_date)) {
                 return res.status(400).json({ status: 400, message: '日期格式不正确，应为 YYYY-MM-DD', data: null })
             }
-            const existing = readRow('SELECT id FROM domains WHERE domain = ?', [data.domain])
+            const existing = readRow('SELECT id, cert_status FROM domains WHERE domain = ?', [data.domain])
             if (existing) {
                 const nextCertStatus = data.cert_status || (data.service_type === '伪装网站' ? '申请中' : '无')
                 run(`UPDATE domains 
@@ -1392,6 +1447,9 @@ const startServer = async () => {
                 ])
                 const updatedDomain = readRow('SELECT * FROM domains WHERE domain = ?', [data.domain])
                 persistDb()
+                if (existing.cert_status !== nextCertStatus) {
+                    notifyCertStatusChange({ type: 'cert_status_updated', domain: data.domain, status: nextCertStatus })
+                }
                 return res.json({ status: 200, message: '更新成功', data: updatedDomain })
             }
             const initialCertStatus = data.cert_status || (data.service_type === '伪装网站' ? '申请中' : '无')
@@ -1413,6 +1471,7 @@ const startServer = async () => {
             ])
             const newDomain = readRow('SELECT * FROM domains WHERE id = last_insert_rowid()')
             persistDb()
+            notifyCertStatusChange({ type: 'cert_status_updated', domain: data.domain, status: initialCertStatus })
             return res.json({ status: 200, message: '创建成功', data: newDomain })
         } catch (error) {
             return res.status(500).json({ status: 500, message: error instanceof Error ? error.message : '创建域名失败', data: null })
