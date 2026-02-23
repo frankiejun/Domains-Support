@@ -49,7 +49,9 @@ const appendLog = (type, message) => {
         if (!fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true })
         }
-        const timestamp = new Date().toISOString()
+        const now = new Date()
+        const pad = (value) => String(value).padStart(2, '0')
+        const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
         fs.appendFileSync(logFilePath, `[${timestamp}] [${type}] ${message}\n`)
     } catch {
     }
@@ -909,6 +911,12 @@ const startServer = async () => {
         res.setHeader('Content-Type', 'text/event-stream')
         res.setHeader('Cache-Control', 'no-cache')
         res.setHeader('Connection', 'keep-alive')
+        if (typeof res.flushHeaders === 'function') {
+            res.flushHeaders()
+        }
+        if (res.socket && typeof res.socket.setTimeout === 'function') {
+            res.socket.setTimeout(0)
+        }
         res.write('data: {"type":"cert_status_batch"}\n\n')
         const pingTimer = setInterval(() => {
             try {

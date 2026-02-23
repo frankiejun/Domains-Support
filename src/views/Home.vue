@@ -712,6 +712,9 @@ const connectCertStatusStream = () => {
     const url = `/api/events/cert-status?token=${encodeURIComponent(authData.token)}`
     const source = new EventSource(url)
     certStatusSource = source
+    source.onopen = () => {
+        scheduleCertStatusRefresh()
+    }
     source.onmessage = () => {
         scheduleCertStatusRefresh()
     }
