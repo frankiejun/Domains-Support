@@ -227,8 +227,12 @@ const checkDomainStatus = async (domain) => {
     return await tryFetch('http')
 }
 
-const execCommand = (command) => new Promise((resolve, reject) => {
-    exec(command, (error, stdout, stderr) => {
+const execCommand = (command, options = {}) => new Promise((resolve, reject) => {
+    const execOptions = {}
+    if (options.timeoutMs) {
+        execOptions.timeout = options.timeoutMs
+    }
+    exec(command, execOptions, (error, stdout, stderr) => {
         if (error) {
             reject(new Error(stderr || error.message))
             return
@@ -558,6 +562,8 @@ const applyCertbot = async (domain) => {
         updateCertStatus(domain, '无', { retryAt: null, retryCount: 0 })
         return
     }
+    const timeoutValue = Number(process.env.CERTBOT_TIMEOUT_MS || 120000)
+    const timeoutMs = Number.isFinite(timeoutValue) && timeoutValue > 0 ? timeoutValue : 120000
     const dnsOk = await isDnsPointingToServer(domain)
     if (!dnsOk) {
         appendLog('certbot', `skip for ${domain}: dns not pointing to server`)
@@ -598,7 +604,7 @@ const applyCertbot = async (domain) => {
     }
     appendLog('certbot', `command ${command}`)
     try {
-        await execCommand(command)
+        await execCommand(command, { timeoutMs })
         updateCertStatus(domain, '成功', { retryAt: null, retryCount: 0 })
         appendLog('certbot', `success for ${domain}`)
     } catch (error) {
