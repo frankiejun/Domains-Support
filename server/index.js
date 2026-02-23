@@ -388,6 +388,14 @@ const cleanValue = (value) => {
     return value.trim().replace(/^['"`]+|['"`]+$/g, '')
 }
 
+const runAsyncTask = (label, task) => {
+    Promise.resolve()
+        .then(task)
+        .catch((error) => {
+            appendLog('system', `${label} failed: ${error instanceof Error ? error.message : String(error)}`)
+        })
+}
+
 const applyCertbot = async (domain) => {
     const certbotCmd = process.env.CERTBOT_CMD
     if (!certbotCmd) {
@@ -401,10 +409,25 @@ const applyCertbot = async (domain) => {
     const acmeServer = cleanValue(process.env.ACME_SERVER)
     const eabKid = cleanValue(process.env.ACME_EAB_KID)
     const eabHmacKey = cleanValue(process.env.ACME_EAB_HMAC_KEY)
+    const defaultAcmeServer = 'https://acme-v02.api.letsencrypt.org/directory'
+    const useZeroSsl = acmeServer && acmeServer.includes('zerossl.com')
+    let effectiveAcmeServer = acmeServer
+    if (useZeroSsl && (!eabKid || !eabHmacKey)) {
+        effectiveAcmeServer = defaultAcmeServer
+        appendLog('certbot', `acme server fallback ${defaultAcmeServer}`)
+    }
+    if (!effectiveAcmeServer) {
+        effectiveAcmeServer = defaultAcmeServer
+        appendLog('certbot', `acme server ${defaultAcmeServer}`)
+    }
     let command = certbotCmd.includes('{domain}') ? certbotCmd.replace('{domain}', domain) : `${certbotCmd} -d ${domain}`
-    if (acmeServer && !command.includes('--server')) {
-        command = `${command} --server ${acmeServer}`
-        appendLog('certbot', `acme server ${acmeServer}`)
+    if (effectiveAcmeServer && !command.includes('--server')) {
+        command = `${command} --server ${effectiveAcmeServer}`
+        if (acmeServer && acmeServer !== effectiveAcmeServer) {
+            appendLog('certbot', `acme server ${effectiveAcmeServer}`)
+        } else if (acmeServer) {
+            appendLog('certbot', `acme server ${acmeServer}`)
+        }
     }
     if (eabKid && eabHmacKey && !command.includes('--eab-kid') && !command.includes('--eab-hmac-key')) {
         command = `${command} --eab-kid ${eabKid} --eab-hmac-key ${eabHmacKey}`
@@ -650,12 +673,13 @@ const startServer = async () => {
                 data.site_id || null,
                 data.memo || ''
             ])
-            if (data.service_type === '伪装网站' && data.site_id) {
-                await applyWebsiteBinding(data.domain, data.site_id)
-            }
             const created = readRow('SELECT * FROM domains WHERE id = last_insert_rowid()')
             persistDb()
-            return res.json({ status: 200, message: '创建成功', data: created })
+            res.json({ status: 200, message: '创建成功', data: created })
+            if (data.service_type === '伪装网站' && data.site_id) {
+                runAsyncTask(`apply binding ${data.domain}`, () => applyWebsiteBinding(data.domain, data.site_id))
+            }
+            return
         } catch (error) {
             return res.status(500).json({ status: 500, message: error instanceof Error ? error.message : '创建域名失败', data: null })
         }
@@ -705,17 +729,18 @@ const startServer = async () => {
                 id
             ])
             const updated = readRow('SELECT * FROM domains WHERE id = ?', [id])
+            persistDb()
+            res.json({ status: 200, message: '更新成功', data: updated })
             if (existing.service_type === '伪装网站' && data.service_type !== '伪装网站') {
-                await removeWebsiteBinding(existing.domain)
+                runAsyncTask(`remove binding ${existing.domain}`, () => removeWebsiteBinding(existing.domain))
             }
             if (existing.service_type === '伪装网站' && data.service_type === '伪装网站' && existing.domain !== data.domain) {
-                await removeWebsiteBinding(existing.domain)
+                runAsyncTask(`remove binding ${existing.domain}`, () => removeWebsiteBinding(existing.domain))
             }
             if (data.service_type === '伪装网站' && data.site_id) {
-                await applyWebsiteBinding(data.domain, data.site_id)
+                runAsyncTask(`apply binding ${data.domain}`, () => applyWebsiteBinding(data.domain, data.site_id))
             }
-            persistDb()
-            return res.json({ status: 200, message: '更新成功', data: updated })
+            return
         } catch (error) {
             return res.status(500).json({ status: 500, message: error instanceof Error ? error.message : '更新域名失败', data: null })
         }
@@ -726,11 +751,12 @@ const startServer = async () => {
             const id = req.params.id
             const existing = readRow('SELECT * FROM domains WHERE id = ?', [id])
             run('DELETE FROM domains WHERE id = ?', [id])
-            if (existing?.service_type === '伪装网站') {
-                await removeWebsiteBinding(existing.domain)
-            }
             persistDb()
-            return res.json({ status: 200, message: '删除成功', data: null })
+            res.json({ status: 200, message: '删除成功', data: null })
+            if (existing?.service_type === '伪装网站') {
+                runAsyncTask(`remove binding ${existing.domain}`, () => removeWebsiteBinding(existing.domain))
+            }
+            return
         } catch (error) {
             return res.status(500).json({ status: 500, message: error instanceof Error ? error.message : '删除域名失败', data: null })
         }
