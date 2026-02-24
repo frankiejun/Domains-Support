@@ -27,6 +27,7 @@ let autoCheckTimer = null
 let certRetryTimer = null
 const bindingInProgress = new Set()
 const certStatusSubscribers = new Set()
+let dbLastMtimeMs = 0
 
 const ensureDir = () => {
     const dir = path.dirname(dbFilePath)
@@ -41,6 +42,11 @@ const persistDb = () => {
     const data = db.export()
     const buffer = Buffer.from(data)
     fs.writeFileSync(dbFilePath, buffer)
+    try {
+        const stat = fs.statSync(dbFilePath)
+        dbLastMtimeMs = stat.mtimeMs
+    } catch {
+    }
 }
 
 const appendLog = (type, message) => {
@@ -58,6 +64,17 @@ const appendLog = (type, message) => {
 }
 
 const readRows = (sql, params = []) => {
+    if (SQL && db && fs.existsSync(dbFilePath)) {
+        try {
+            const stat = fs.statSync(dbFilePath)
+            if (stat.mtimeMs > dbLastMtimeMs) {
+                const fileBuffer = fs.readFileSync(dbFilePath)
+                db = new SQL.Database(fileBuffer)
+                dbLastMtimeMs = stat.mtimeMs
+            }
+        } catch {
+        }
+    }
     const stmt = db.prepare(sql)
     stmt.bind(params)
     const rows = []
@@ -828,6 +845,11 @@ const startServer = async () => {
     if (fs.existsSync(dbFilePath)) {
         const fileBuffer = fs.readFileSync(dbFilePath)
         db = new SQL.Database(fileBuffer)
+        try {
+            const stat = fs.statSync(dbFilePath)
+            dbLastMtimeMs = stat.mtimeMs
+        } catch {
+        }
     } else {
         db = new SQL.Database()
     }
