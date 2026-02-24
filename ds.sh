@@ -6,9 +6,9 @@ DOMAIN_ARG="${2:-}"
 
 REPO_URL="https://github.com/frankiejun/Domains-Support.git"
 BRANCH="vps-beta"
-SRC_DIR="$(pwd)/Domains-Support"
-DEPLOY_DIR="/deploy/domains-support"
-WWW_DIR="/var/www/domains-support"
+SRC_DIR="./"
+DEPLOY_DIR="/deploy/Domains-Support"
+WWW_DIR="/var/www/Domains-Support"
 NGINX_CONF="/etc/nginx/conf.d/ds.conf"
 PM2_NAME="ds"
 
