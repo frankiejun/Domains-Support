@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS domains (
     cert_status TEXT NOT NULL DEFAULT '无',
     cert_retry_count INTEGER DEFAULT 0,
     cert_retry_at TEXT,
-    tgsend  INTEGER DEFAULT 0,             --用于到期是否通知，0不通知，1通知。
+    tgsend  INTEGER DEFAULT 0,
+    st_tgsend INTEGER DEFAULT 1,
+    site_id INTEGER,
     memo TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 ); 
@@ -23,30 +25,16 @@ CREATE TABLE IF NOT EXISTS alertcfg (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tg_token TEXT NOT NULL,
     tg_userid TEXT NOT NULL,
+    wx_api TEXT,
+    wx_token TEXT,
+    auto_check_enabled INTEGER DEFAULT 0,
+    auto_check_interval INTEGER DEFAULT 30,
     days INTEGER NOT NULL DEFAULT 30,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 ); 
-
---v1.0.2 更新sql,需到cf上的domains-db的控制台上运行，用于域名对应网站离线时是否通知。 1通知，0不通知
-ALTER TABLE domains ADD COLUMN st_tgsend INTEGER DEFAULT 1;
-update domains set st_tgsend = 1 where st_tgsend is null;
-
---v1.0.6 更新sql,需到cf上的domains-db的控制台上运行，用于添加微信通知功能
-ALTER TABLE alertcfg ADD COLUMN wx_api TEXT;
-ALTER TABLE alertcfg ADD COLUMN wx_token TEXT;
-ALTER TABLE alertcfg ADD COLUMN auto_check_enabled INTEGER DEFAULT 0;
-ALTER TABLE alertcfg ADD COLUMN auto_check_interval INTEGER DEFAULT 30;
-
---v2.0.1 
-ALTER TABLE domains ADD COLUMN site_id INTEGER;
 CREATE TABLE IF NOT EXISTS websitecfg (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     filename TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
---v2.0.2
-ALTER TABLE domains ADD COLUMN cert_status TEXT NOT NULL DEFAULT '无';
-ALTER TABLE domains ADD COLUMN cert_retry_count INTEGER DEFAULT 0;
-ALTER TABLE domains ADD COLUMN cert_retry_at TEXT;
-update domains set cert_status = '无' where cert_status is null;

@@ -79,6 +79,14 @@ const hasColumn = (table, column) => {
     return columns.some((col) => col.name === column)
 }
 
+const addColumnIfMissing = (table, column, ddl) => {
+    if (!hasColumn(table, column)) {
+        run(ddl)
+        return true
+    }
+    return false
+}
+
 const ensureSchema = () => {
     run(`CREATE TABLE IF NOT EXISTS domains (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,35 +123,8 @@ const ensureSchema = () => {
         days INTEGER NOT NULL DEFAULT 30,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`)
-    if (!hasColumn('domains', 'st_tgsend')) {
-        run('ALTER TABLE domains ADD COLUMN st_tgsend INTEGER DEFAULT 1')
-    }
-    if (!hasColumn('domains', 'site_id')) {
-        run('ALTER TABLE domains ADD COLUMN site_id INTEGER')
-    }
-    if (!hasColumn('domains', 'cert_status')) {
-        run(`ALTER TABLE domains ADD COLUMN cert_status TEXT NOT NULL DEFAULT '无'`)
-    }
-    if (!hasColumn('domains', 'cert_retry_count')) {
-        run('ALTER TABLE domains ADD COLUMN cert_retry_count INTEGER DEFAULT 0')
-    }
-    if (!hasColumn('domains', 'cert_retry_at')) {
-        run('ALTER TABLE domains ADD COLUMN cert_retry_at TEXT')
-    }
     if (hasColumn('domains', 'cert_status')) {
         run(`UPDATE domains SET cert_status = '无' WHERE cert_status IS NULL`)
-    }
-    if (!hasColumn('alertcfg', 'wx_api')) {
-        run('ALTER TABLE alertcfg ADD COLUMN wx_api TEXT')
-    }
-    if (!hasColumn('alertcfg', 'wx_token')) {
-        run('ALTER TABLE alertcfg ADD COLUMN wx_token TEXT')
-    }
-    if (!hasColumn('alertcfg', 'auto_check_enabled')) {
-        run('ALTER TABLE alertcfg ADD COLUMN auto_check_enabled INTEGER DEFAULT 0')
-    }
-    if (!hasColumn('alertcfg', 'auto_check_interval')) {
-        run('ALTER TABLE alertcfg ADD COLUMN auto_check_interval INTEGER DEFAULT 30')
     }
     const websiteCount = readRow('SELECT COUNT(*) AS count FROM websitecfg')
     if (!websiteCount || websiteCount.count === 0) {
