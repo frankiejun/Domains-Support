@@ -481,11 +481,21 @@ const isDnsPointingToServer = async (domain) => {
     return matchIpv4 || matchIpv6
 }
 
-const getZoneCandidate = (domain) => {
-    if (!domain || !domain.includes('.')) return domain
-    const parts = domain.split('.').filter(Boolean)
-    if (parts.length <= 2) return domain
-    return parts.slice(-2).join('.')
+const normalizeDomain = (value) => (value || '').trim().toLowerCase()
+
+const matchZoneForDomain = (domain, zones) => {
+    const target = normalizeDomain(domain)
+    let best = null
+    for (const zone of zones || []) {
+        const name = normalizeDomain(zone?.name)
+        if (!name) continue
+        if (target === name || target.endsWith(`.${name}`)) {
+            if (!best || name.length > best.name.length) {
+                best = zone
+            }
+        }
+    }
+    return best
 }
 
 const maskToken = (token) => {
@@ -558,9 +568,23 @@ const bindCfDnsRecords = async (domain, cfAccountId) => {
     if (!account) {
         throw new Error('CF账号不存在')
     }
-    const zoneName = getZoneCandidate(domain)
-    const zones = await cfRequest(account.token, `https://api.cloudflare.com/client/v4/zones?name=${encodeURIComponent(zoneName)}`, {}, account.email)
-    const zone = Array.isArray(zones.result) && zones.result.length > 0 ? zones.result[0] : null
+    let zones = []
+    let page = 1
+    let totalPages = 1
+    while (page <= totalPages) {
+        const list = await cfRequest(
+            account.token,
+            `https://api.cloudflare.com/client/v4/zones?per_page=50&page=${page}`,
+            {},
+            account.email
+        )
+        if (Array.isArray(list?.result)) {
+            zones.push(...list.result)
+        }
+        totalPages = Number(list?.result_info?.total_pages || totalPages)
+        page += 1
+    }
+    const zone = matchZoneForDomain(domain, zones)
     if (!zone?.id) {
         throw new Error('未找到对应的CF Zone')
     }
