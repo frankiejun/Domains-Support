@@ -24,8 +24,10 @@ const logFilePath = process.env.OP_LOG_PATH || path.join(__dirname, '..', 'logs'
 let SQL = null
 let db = null
 let autoCheckTimer = null
-let certRetryTimer = null
-const bindingInProgress = new Set()
+let certQueueTimer = null
+let certQueueProcessing = false
+const certQueue = []
+const certQueueSet = new Set()
 const certStatusSubscribers = new Set()
 let dbLastMtimeMs = 0
 
@@ -482,6 +484,71 @@ const runAsyncTask = (label, task) => {
         })
 }
 
+const isCertbotRunning = async () => {
+    try {
+        const output = await execCommand("pgrep -f '[c]ertbot'")
+        return output.trim().length > 0
+    } catch {
+        return false
+    }
+}
+
+const enqueueCertRequest = (domain, siteId) => {
+    if (!siteId || certQueueSet.has(domain)) return
+    certQueue.push({ domain, siteId })
+    certQueueSet.add(domain)
+    updateCertStatus(domain, '申请中', { retryAt: null, retryCount: 0 })
+}
+
+const processCertQueue = async () => {
+    if (certQueueProcessing) return
+    if (certQueue.length === 0) return
+    if (await isCertbotRunning()) return
+    const task = certQueue.shift()
+    if (!task) return
+    certQueueSet.delete(task.domain)
+    certQueueProcessing = true
+    try {
+        const dnsOk = await isDnsPointingToServer(task.domain)
+        if (!dnsOk) {
+            updateCertStatus(task.domain, '未设置DNS', { retryAt: null, retryCount: 0 })
+            appendLog('certbot', `skip for ${task.domain}: dns not pointing to server`)
+            return
+        }
+        const certDomains = await listCertbotDomains()
+        const wildcard = getWildcardCandidate(task.domain)
+        const hasExistingCert = certDomains.has(task.domain) || (wildcard ? certDomains.has(wildcard) : false)
+        if (hasExistingCert) {
+            updateCertStatus(task.domain, '成功', { retryAt: null, retryCount: 0 })
+            appendLog('certbot', `skip for ${task.domain}: cert exists`)
+            return
+        }
+        const site = readRow('SELECT * FROM websitecfg WHERE id = ?', [task.siteId])
+        if (!site) {
+            updateCertStatus(task.domain, '失败', { retryAt: null, retryCount: 0 })
+            appendLog('nginx', `skip binding for ${task.domain}: site not found ${task.siteId}`)
+            return
+        }
+        await writeNginxConfig(task.domain, site.filename)
+        await applyCertbot(task.domain)
+    } catch (error) {
+        updateCertStatus(task.domain, '失败', { retryAt: null, retryCount: 0 })
+        appendLog('certbot', `failed for ${task.domain}: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+        certQueueProcessing = false
+    }
+}
+
+const initCertQueue = () => {
+    const rows = readRows(`SELECT domain, site_id FROM domains
+        WHERE service_type = '伪装网站'
+        AND cert_status = '申请中'
+        AND site_id IS NOT NULL`)
+    for (const row of rows) {
+        enqueueCertRequest(row.domain, row.site_id)
+    }
+}
+
 const notifyCertStatusChange = (payload) => {
     if (certStatusSubscribers.size === 0) return
     const data = `data: ${JSON.stringify(payload)}\n\n`
@@ -511,77 +578,6 @@ const updateCertStatus = (domain, status, options = {}) => {
     notifyCertStatusChange({ type: 'cert_status_updated', domain, status })
 }
 
-const formatLocalDateTime = (date) => {
-    const pad = (value) => String(value).padStart(2, '0')
-    const year = date.getFullYear()
-    const month = pad(date.getMonth() + 1)
-    const day = pad(date.getDate())
-    const hours = pad(date.getHours())
-    const minutes = pad(date.getMinutes())
-    const seconds = pad(date.getSeconds())
-    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
-}
-
-const parseRetryAt = (value) => {
-    if (!value) return null
-    if (typeof value === 'number') return value
-    if (typeof value === 'string') {
-        const trimmed = value.trim()
-        if (/^\d+$/.test(trimmed)) {
-            return Number(trimmed)
-        }
-        const localMatch = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(trimmed)
-        if (localMatch) {
-            const [, y, m, d, hh, mm, ss] = localMatch
-            return new Date(
-                Number(y),
-                Number(m) - 1,
-                Number(d),
-                Number(hh),
-                Number(mm),
-                Number(ss)
-            ).getTime()
-        }
-        const parsed = Date.parse(trimmed)
-        return Number.isNaN(parsed) ? null : parsed
-    }
-    return null
-}
-
-const getRetryDelayMinutes = (count) => {
-    const base = 5
-    const maxDelay = 360
-    const delay = base * Math.pow(2, Math.max(0, count - 1))
-    return Math.min(maxDelay, delay)
-}
-
-const scheduleCertRetry = (domain) => {
-    const row = readRow('SELECT cert_retry_count FROM domains WHERE domain = ?', [domain])
-    const nextCount = (row?.cert_retry_count || 0) + 1
-    const delayMinutes = getRetryDelayMinutes(nextCount)
-    const retryAt = formatLocalDateTime(new Date(Date.now() + delayMinutes * 60 * 1000))
-    updateCertStatus(domain, '失败', { retryAt, retryCount: nextCount })
-    appendLog('certbot', `retry scheduled ${domain} ${delayMinutes}m`)
-}
-
-const processCertRetries = async () => {
-    const rows = readRows(`SELECT domain, site_id FROM domains
-        WHERE service_type = '伪装网站'
-        AND cert_status = '失败'
-        AND cert_retry_at IS NOT NULL`)
-    if (rows.length === 0) return
-    const now = Date.now()
-    const dueRows = rows.filter((row) => {
-        const retryAt = parseRetryAt(row.cert_retry_at)
-        return retryAt !== null && retryAt <= now
-    })
-    if (dueRows.length === 0) return
-    await runWithConcurrency(dueRows, 3, async (row) => {
-        if (!row.site_id) return
-        runAsyncTask(`retry binding ${row.domain}`, () => applyWebsiteBinding(row.domain, row.site_id))
-    })
-}
-
 const syncCertStatusFromCertbot = async () => {
     const certDomains = await listCertbotDomains()
     if (certDomains.size === 0) return
@@ -605,23 +601,6 @@ const syncCertStatusAndFetchDomains = async () => {
     return readRows('SELECT * FROM domains ORDER BY created_at DESC')
 }
 
-const recoverPendingCerts = async () => {
-    const rows = readRows(`SELECT domain, cert_retry_count FROM domains
-        WHERE service_type = '伪装网站'
-        AND cert_status = '申请中'`)
-    if (rows.length === 0) return
-    const retryAt = formatLocalDateTime(new Date())
-    let recovered = 0
-    for (const row of rows) {
-        const nextCount = (row.cert_retry_count || 0) + 1
-        updateCertStatus(row.domain, '失败', { retryAt, retryCount: nextCount })
-        recovered += 1
-    }
-    if (recovered > 0) {
-        appendLog('certbot', `pending certs recovered ${recovered}`)
-    }
-}
-
 const applyCertbot = async (domain) => {
     const certbotCmd = process.env.CERTBOT_CMD
     if (!certbotCmd) {
@@ -631,17 +610,6 @@ const applyCertbot = async (domain) => {
     }
     const timeoutValue = Number(process.env.CERTBOT_TIMEOUT_MS || 120000)
     const timeoutMs = Number.isFinite(timeoutValue) && timeoutValue > 0 ? timeoutValue : 120000
-    const dnsOk = await isDnsPointingToServer(domain)
-    if (!dnsOk) {
-        appendLog('certbot', `skip for ${domain}: dns not pointing to server`)
-        scheduleCertRetry(domain)
-        return
-    }
-    const hasWildcard = await hasWildcardCertificate(domain)
-    if (hasWildcard) {
-        updateCertStatus(domain, '成功', { retryAt: null, retryCount: 0 })
-        return
-    }
     const acmeServer = cleanValue(process.env.ACME_SERVER)
     const eabKid = cleanValue(process.env.ACME_EAB_KID)
     const eabHmacKey = cleanValue(process.env.ACME_EAB_HMAC_KEY)
@@ -675,32 +643,14 @@ const applyCertbot = async (domain) => {
         updateCertStatus(domain, '成功', { retryAt: null, retryCount: 0 })
         appendLog('certbot', `success for ${domain}`)
     } catch (error) {
-        scheduleCertRetry(domain)
+        updateCertStatus(domain, '失败', { retryAt: null, retryCount: 0 })
         appendLog('certbot', `failed for ${domain}: ${error instanceof Error ? error.message : String(error)}`)
-        throw error
     }
 }
 
 const applyWebsiteBinding = async (domain, siteId) => {
-    if (bindingInProgress.has(domain)) {
-        appendLog('nginx', `skip binding ${domain}: in progress`)
-        return
-    }
-    bindingInProgress.add(domain)
-    appendLog('nginx', `apply binding ${domain} site ${siteId}`)
-    const site = readRow('SELECT * FROM websitecfg WHERE id = ?', [siteId])
-    if (!site) {
-        appendLog('nginx', `skip binding for ${domain}: site not found ${siteId}`)
-        bindingInProgress.delete(domain)
-        return
-    }
-    updateCertStatus(domain, '申请中', { retryAt: null })
-    try {
-        await writeNginxConfig(domain, site.filename)
-        await applyCertbot(domain)
-    } finally {
-        bindingInProgress.delete(domain)
-    }
+    appendLog('certbot', `queue ${domain} site ${siteId}`)
+    enqueueCertRequest(domain, siteId)
 }
 
 const removeWebsiteBinding = async (domain) => {
@@ -857,14 +807,16 @@ const startServer = async () => {
     const initialConfig = readRow('SELECT * FROM alertcfg LIMIT 1')
     applyAutoCheckConfig(initialConfig)
     runAsyncTask('cert status sync', syncCertStatusFromCertbot)
-    runAsyncTask('cert pending recover', recoverPendingCerts)
-    if (certRetryTimer) {
-        clearInterval(certRetryTimer)
-        certRetryTimer = null
+    runAsyncTask('cert queue init', () => {
+        initCertQueue()
+        return processCertQueue()
+    })
+    if (certQueueTimer) {
+        clearInterval(certQueueTimer)
+        certQueueTimer = null
     }
-    runAsyncTask('cert retry init', processCertRetries)
-    certRetryTimer = setInterval(() => {
-        runAsyncTask('cert retry tick', processCertRetries)
+    certQueueTimer = setInterval(() => {
+        runAsyncTask('cert queue tick', processCertQueue)
     }, 60 * 1000)
     appendLog('system', `server start port ${port} log ${logFilePath}`)
 

@@ -110,7 +110,7 @@
                 <template #default="scope">
                     <span :class="{
                         'success-text': scope.row.cert_status === '成功',
-                        'warning-text': scope.row.cert_status === '申请中',
+                        'warning-text': scope.row.cert_status === '申请中' || scope.row.cert_status === '未设置DNS',
                         'danger-text': scope.row.cert_status === '失败'
                     }">
                         {{ scope.row.cert_status || '无' }}
