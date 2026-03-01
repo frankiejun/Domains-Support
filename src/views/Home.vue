@@ -403,6 +403,8 @@ const handleCopyInfo = () => {
                 tgsend: source.tgsend,
                 st_tgsend: source.st_tgsend,
                 site_id: source.site_id,
+                    cf_hosted: source.cf_hosted ?? 0,
+                    cf_account_id: source.cf_account_id ?? null,
                 memo: source.memo
             }
 

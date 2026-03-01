@@ -1172,7 +1172,7 @@ const startServer = async () => {
             if (existing.service_type === '伪装网站' && data.service_type === '伪装网站' && existing.domain !== data.domain) {
                 runAsyncTask(`remove binding ${existing.domain}`, () => removeWebsiteBinding(existing.domain))
             }
-            if (data.service_type === '伪装网站' && data.site_id && (existing.service_type !== '伪装网站' || existing.domain !== data.domain || existing.site_id !== data.site_id || cfChanged)) {
+            if (data.service_type === '伪装网站' && data.site_id && nextCertStatus === '申请中') {
                 runAsyncTask(`apply binding ${data.domain}`, async () => {
                     try {
                         if (cfHostedValue === 1 && cfAccountIdValue) {
