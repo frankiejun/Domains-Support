@@ -353,15 +353,27 @@ const writeNginxConfig = async (domain, filename) => {
     if (!fs.existsSync(nginxSitesDir)) {
         fs.mkdirSync(nginxSitesDir, { recursive: true })
     }
+    const certDir = `/etc/letsencrypt/live/${domain}`
+    const certFile = path.join(certDir, 'fullchain.pem')
+    const keyFile = path.join(certDir, 'privkey.pem')
+    const hasCert = fs.existsSync(certFile) && fs.existsSync(keyFile)
     const config = [
         'server {',
         '    listen 80;',
+        '    listen [::]:80;',
+        ...(hasCert ? ['    listen 443 ssl;', '    listen [::]:443 ssl;'] : []),
         `    server_name ${domain};`,
         `    root ${resolved.root};`,
         `    index ${resolved.index};`,
         '    location / {',
         '        try_files $uri $uri/ =404;',
         '    }',
+        ...(hasCert ? [
+            `    ssl_certificate ${certFile};`,
+            `    ssl_certificate_key ${keyFile};`,
+            '    include /etc/letsencrypt/options-ssl-nginx.conf;',
+            '    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;'
+        ] : []),
         '}',
         ''
     ].join('\n')
