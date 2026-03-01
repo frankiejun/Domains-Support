@@ -494,35 +494,63 @@ const maskToken = (token) => {
     return `${'*'.repeat(Math.max(0, token.length - 5))}${visible}`
 }
 
-const cfRequest = async (token, url, options = {}) => {
-    const response = await fetch(url, {
-        ...options,
-        headers: {
+const buildCfHeaders = (token, email, useKeyAuth) => {
+    if (useKeyAuth) {
+        return {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`,
-            ...(options.headers || {})
+            'X-Auth-Email': email || '',
+            'X-Auth-Key': token || '',
+            'User-Agent': 'Domains-Support'
         }
-    })
-    const data = await response.json()
-    if (!response.ok || data?.success === false) {
-        const message = data?.errors?.[0]?.message || response.statusText || 'Cloudflare request failed'
-        throw new Error(message)
     }
-    return data
+    return {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+        'User-Agent': 'Domains-Support'
+    }
 }
 
-const upsertCfRecord = async (token, zoneId, type, name, content) => {
+const cfRequest = async (token, url, options = {}, email) => {
+    const send = async (useKeyAuth) => {
+        const response = await fetch(url, {
+            ...options,
+            headers: {
+                ...buildCfHeaders(token, email, useKeyAuth),
+                ...(options.headers || {})
+            }
+        })
+        const data = await response.json()
+        if (!response.ok || data?.success === false) {
+            const message = data?.errors?.[0]?.message || response.statusText || 'Cloudflare request failed'
+            const error = new Error(message)
+            error.status = response.status
+            throw error
+        }
+        return data
+    }
+    try {
+        return await send(false)
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (email && message.includes('Invalid request headers')) {
+            return await send(true)
+        }
+        throw error
+    }
+}
+
+const upsertCfRecord = async (token, email, zoneId, type, name, content) => {
     const listUrl = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=${type}&name=${encodeURIComponent(name)}`
-    const list = await cfRequest(token, listUrl)
+    const list = await cfRequest(token, listUrl, {}, email)
     const existing = Array.isArray(list.result) && list.result.length > 0 ? list.result[0] : null
     const payload = { type, name, content, ttl: 1, proxied: false }
     if (existing) {
         const updateUrl = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records/${existing.id}`
-        await cfRequest(token, updateUrl, { method: 'PUT', body: JSON.stringify(payload) })
+        await cfRequest(token, updateUrl, { method: 'PUT', body: JSON.stringify(payload) }, email)
         return
     }
     const createUrl = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records`
-    await cfRequest(token, createUrl, { method: 'POST', body: JSON.stringify(payload) })
+    await cfRequest(token, createUrl, { method: 'POST', body: JSON.stringify(payload) }, email)
 }
 
 const bindCfDnsRecords = async (domain, cfAccountId) => {
@@ -531,7 +559,7 @@ const bindCfDnsRecords = async (domain, cfAccountId) => {
         throw new Error('CF账号不存在')
     }
     const zoneName = getZoneCandidate(domain)
-    const zones = await cfRequest(account.token, `https://api.cloudflare.com/client/v4/zones?name=${encodeURIComponent(zoneName)}`)
+    const zones = await cfRequest(account.token, `https://api.cloudflare.com/client/v4/zones?name=${encodeURIComponent(zoneName)}`, {}, account.email)
     const zone = Array.isArray(zones.result) && zones.result.length > 0 ? zones.result[0] : null
     if (!zone?.id) {
         throw new Error('未找到对应的CF Zone')
@@ -541,10 +569,10 @@ const bindCfDnsRecords = async (domain, cfAccountId) => {
         throw new Error('未检测到服务器公网IP')
     }
     for (const ip of ipv4Public) {
-        await upsertCfRecord(account.token, zone.id, 'A', domain, ip)
+        await upsertCfRecord(account.token, account.email, zone.id, 'A', domain, ip)
     }
     for (const ip of ipv6Global) {
-        await upsertCfRecord(account.token, zone.id, 'AAAA', domain, ip)
+        await upsertCfRecord(account.token, account.email, zone.id, 'AAAA', domain, ip)
     }
 }
 
