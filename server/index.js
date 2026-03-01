@@ -122,6 +122,8 @@ const ensureSchema = () => {
         tgsend INTEGER DEFAULT 0,
         st_tgsend INTEGER DEFAULT 1,
         site_id INTEGER,
+        cf_hosted INTEGER DEFAULT 0,
+        cf_account_id INTEGER,
         memo TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`)
@@ -142,6 +144,14 @@ const ensureSchema = () => {
         days INTEGER NOT NULL DEFAULT 30,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`)
+    run(`CREATE TABLE IF NOT EXISTS cf_accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL,
+        token TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`)
+    addColumnIfMissing('domains', 'cf_hosted', 'ALTER TABLE domains ADD COLUMN cf_hosted INTEGER DEFAULT 0')
+    addColumnIfMissing('domains', 'cf_account_id', 'ALTER TABLE domains ADD COLUMN cf_account_id INTEGER')
     if (hasColumn('domains', 'cert_status')) {
         run(`UPDATE domains SET cert_status = '无' WHERE cert_status IS NULL`)
     }
@@ -471,6 +481,73 @@ const isDnsPointingToServer = async (domain) => {
     return matchIpv4 || matchIpv6
 }
 
+const getZoneCandidate = (domain) => {
+    if (!domain || !domain.includes('.')) return domain
+    const parts = domain.split('.').filter(Boolean)
+    if (parts.length <= 2) return domain
+    return parts.slice(-2).join('.')
+}
+
+const maskToken = (token) => {
+    if (!token) return ''
+    const visible = token.slice(-5)
+    return `${'*'.repeat(Math.max(0, token.length - 5))}${visible}`
+}
+
+const cfRequest = async (token, url, options = {}) => {
+    const response = await fetch(url, {
+        ...options,
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+            ...(options.headers || {})
+        }
+    })
+    const data = await response.json()
+    if (!response.ok || data?.success === false) {
+        const message = data?.errors?.[0]?.message || response.statusText || 'Cloudflare request failed'
+        throw new Error(message)
+    }
+    return data
+}
+
+const upsertCfRecord = async (token, zoneId, type, name, content) => {
+    const listUrl = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=${type}&name=${encodeURIComponent(name)}`
+    const list = await cfRequest(token, listUrl)
+    const existing = Array.isArray(list.result) && list.result.length > 0 ? list.result[0] : null
+    const payload = { type, name, content, ttl: 1, proxied: false }
+    if (existing) {
+        const updateUrl = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records/${existing.id}`
+        await cfRequest(token, updateUrl, { method: 'PUT', body: JSON.stringify(payload) })
+        return
+    }
+    const createUrl = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records`
+    await cfRequest(token, createUrl, { method: 'POST', body: JSON.stringify(payload) })
+}
+
+const bindCfDnsRecords = async (domain, cfAccountId) => {
+    const account = readRow('SELECT * FROM cf_accounts WHERE id = ?', [cfAccountId])
+    if (!account) {
+        throw new Error('CF账号不存在')
+    }
+    const zoneName = getZoneCandidate(domain)
+    const zones = await cfRequest(account.token, `https://api.cloudflare.com/client/v4/zones?name=${encodeURIComponent(zoneName)}`)
+    const zone = Array.isArray(zones.result) && zones.result.length > 0 ? zones.result[0] : null
+    if (!zone?.id) {
+        throw new Error('未找到对应的CF Zone')
+    }
+    const { ipv4Public, ipv6Global } = getServerIpCandidates()
+    if (ipv4Public.length === 0 && ipv6Global.length === 0) {
+        throw new Error('未检测到服务器公网IP')
+    }
+    for (const ip of ipv4Public) {
+        await upsertCfRecord(account.token, zone.id, 'A', domain, ip)
+    }
+    for (const ip of ipv6Global) {
+        await upsertCfRecord(account.token, zone.id, 'AAAA', domain, ip)
+    }
+}
+
 const cleanValue = (value) => {
     if (!value) return ''
     return value.trim().replace(/^['"`]+|['"`]+$/g, '')
@@ -493,11 +570,13 @@ const isCertbotRunning = async () => {
     }
 }
 
-const enqueueCertRequest = (domain, siteId) => {
+const enqueueCertRequest = (domain, siteId, options = {}) => {
     if (!siteId || certQueueSet.has(domain)) return
     certQueue.push({ domain, siteId })
     certQueueSet.add(domain)
-    updateCertStatus(domain, '申请中', { retryAt: null, retryCount: 0 })
+    if (options.setStatus !== false) {
+        updateCertStatus(domain, '申请中', { retryAt: null, retryCount: 0 })
+    }
 }
 
 const processCertQueue = async () => {
@@ -509,10 +588,14 @@ const processCertQueue = async () => {
     certQueueSet.delete(task.domain)
     certQueueProcessing = true
     try {
+        const domainRow = readRow('SELECT cf_hosted, cf_account_id FROM domains WHERE domain = ?', [task.domain])
         const dnsOk = await isDnsPointingToServer(task.domain)
         if (!dnsOk) {
             updateCertStatus(task.domain, '未设置DNS', { retryAt: null, retryCount: 0 })
             appendLog('certbot', `skip for ${task.domain}: dns not pointing to server`)
+            if (domainRow?.cf_hosted === 1 && task.siteId) {
+                enqueueCertRequest(task.domain, task.siteId, { setStatus: false })
+            }
             return
         }
         const certDomains = await listCertbotDomains()
@@ -900,12 +983,15 @@ const startServer = async () => {
             if (data.service_type === '伪装网站' && !data.site_id) {
                 return res.status(400).json({ status: 400, message: '请选择网站', data: null })
             }
+            if (data.service_type === '伪装网站' && Number(data.cf_hosted) === 1 && !data.cf_account_id) {
+                return res.status(400).json({ status: 400, message: '请选择CF账号', data: null })
+            }
             const initialCertStatus = data.service_type === '伪装网站' ? '申请中' : '无'
             run(`INSERT INTO domains (
                 domain, registrar, registrar_link, registrar_date,
                 expiry_date, service_type, status, cert_status,
-                tgsend, st_tgsend, site_id, memo
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                tgsend, st_tgsend, site_id, cf_hosted, cf_account_id, memo
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
                 data.domain,
                 data.registrar,
                 data.registrar_link || '',
@@ -917,6 +1003,8 @@ const startServer = async () => {
                 data.tgsend ?? 1,
                 data.st_tgsend ?? 0,
                 data.site_id || null,
+                data.service_type === '伪装网站' ? Number(data.cf_hosted || 0) : 0,
+                data.service_type === '伪装网站' ? (data.cf_account_id || null) : null,
                 data.memo || ''
             ])
             const created = readRow('SELECT * FROM domains WHERE id = last_insert_rowid()')
@@ -924,7 +1012,17 @@ const startServer = async () => {
             res.json({ status: 200, message: '创建成功', data: created })
             notifyCertStatusChange({ type: 'cert_status_updated', domain: data.domain, status: initialCertStatus })
             if (data.service_type === '伪装网站' && data.site_id) {
-                runAsyncTask(`apply binding ${data.domain}`, () => applyWebsiteBinding(data.domain, data.site_id))
+                runAsyncTask(`apply binding ${data.domain}`, async () => {
+                    try {
+                        if (Number(data.cf_hosted) === 1 && data.cf_account_id) {
+                            await bindCfDnsRecords(data.domain, data.cf_account_id)
+                        }
+                        applyWebsiteBinding(data.domain, data.site_id)
+                    } catch (error) {
+                        updateCertStatus(data.domain, '失败', { retryAt: null, retryCount: 0 })
+                        appendLog('certbot', `cf bind failed for ${data.domain}: ${error instanceof Error ? error.message : String(error)}`)
+                    }
+                })
             }
             return
         } catch (error) {
@@ -945,10 +1043,16 @@ const startServer = async () => {
             if (data.service_type === '伪装网站' && !data.site_id) {
                 return res.status(400).json({ status: 400, message: '请选择网站', data: null })
             }
+            if (data.service_type === '伪装网站' && Number(data.cf_hosted) === 1 && !data.cf_account_id) {
+                return res.status(400).json({ status: 400, message: '请选择CF账号', data: null })
+            }
             const existing = readRow('SELECT * FROM domains WHERE id = ?', [id])
             if (!existing) {
                 return res.status(404).json({ status: 404, message: '域名不存在', data: null })
             }
+            const cfHostedValue = data.service_type === '伪装网站' ? Number(data.cf_hosted || 0) : 0
+            const cfAccountIdValue = data.service_type === '伪装网站' ? (data.cf_account_id || null) : null
+            const cfChanged = existing.cf_hosted !== cfHostedValue || existing.cf_account_id !== cfAccountIdValue
             let nextCertStatus = existing.cert_status || '无'
             let nextRetryCount = existing.cert_retry_count || 0
             let nextRetryAt = existing.cert_retry_at || null
@@ -956,7 +1060,7 @@ const startServer = async () => {
                 nextCertStatus = '无'
                 nextRetryCount = 0
                 nextRetryAt = null
-            } else if (existing.service_type !== '伪装网站' || existing.domain !== data.domain || existing.site_id !== data.site_id) {
+            } else if (existing.service_type !== '伪装网站' || existing.domain !== data.domain || existing.site_id !== data.site_id || cfChanged) {
                 nextCertStatus = '申请中'
                 nextRetryCount = 0
                 nextRetryAt = null
@@ -975,6 +1079,8 @@ const startServer = async () => {
                 tgsend = ?,
                 st_tgsend = ?,
                 site_id = ?,
+                cf_hosted = ?,
+                cf_account_id = ?,
                 memo = ?
             WHERE id = ?`, [
                 data.domain,
@@ -990,6 +1096,8 @@ const startServer = async () => {
                 data.tgsend || 0,
                 data.st_tgsend ?? 1,
                 data.service_type === '伪装网站' ? data.site_id : null,
+                cfHostedValue,
+                cfAccountIdValue,
                 data.memo || '',
                 id
             ])
@@ -1005,8 +1113,18 @@ const startServer = async () => {
             if (existing.service_type === '伪装网站' && data.service_type === '伪装网站' && existing.domain !== data.domain) {
                 runAsyncTask(`remove binding ${existing.domain}`, () => removeWebsiteBinding(existing.domain))
             }
-            if (data.service_type === '伪装网站' && data.site_id) {
-                runAsyncTask(`apply binding ${data.domain}`, () => applyWebsiteBinding(data.domain, data.site_id))
+            if (data.service_type === '伪装网站' && data.site_id && (existing.service_type !== '伪装网站' || existing.domain !== data.domain || existing.site_id !== data.site_id || cfChanged)) {
+                runAsyncTask(`apply binding ${data.domain}`, async () => {
+                    try {
+                        if (cfHostedValue === 1 && cfAccountIdValue) {
+                            await bindCfDnsRecords(data.domain, cfAccountIdValue)
+                        }
+                        applyWebsiteBinding(data.domain, data.site_id)
+                    } catch (error) {
+                        updateCertStatus(data.domain, '失败', { retryAt: null, retryCount: 0 })
+                        appendLog('certbot', `cf bind failed for ${data.domain}: ${error instanceof Error ? error.message : String(error)}`)
+                    }
+                })
             }
             return
         } catch (error) {
@@ -1075,7 +1193,7 @@ const startServer = async () => {
 
     app.get('/api/domains/export', (req, res) => {
         try {
-            const rows = readRows('SELECT domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, cert_status, memo, tgsend, st_tgsend, site_id FROM domains')
+            const rows = readRows('SELECT domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, cert_status, memo, tgsend, st_tgsend, site_id, cf_hosted, cf_account_id FROM domains')
             const filename = `domains-export-${new Date().toISOString().split('T')[0]}.json`
             res.setHeader('Content-Type', 'application/json')
             res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
@@ -1132,7 +1250,9 @@ const startServer = async () => {
                             memo = ?, 
                             tgsend = ?, 
                             st_tgsend = ?,
-                            site_id = ?
+                            site_id = ?,
+                            cf_hosted = ?,
+                            cf_account_id = ?
                         WHERE domain = ?`, [
                             domain.registrar || '',
                             domain.registrar_link || '',
@@ -1145,12 +1265,14 @@ const startServer = async () => {
                             domain.tgsend || 0,
                             domain.st_tgsend || 0,
                             domain.site_id || null,
+                            Number(domain.cf_hosted || 0),
+                            domain.cf_account_id || null,
                             domain.domain
                         ])
                     } else {
                         run(`INSERT INTO domains 
-                            (domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, cert_status, memo, tgsend, st_tgsend, site_id)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                            (domain, registrar, registrar_link, registrar_date, expiry_date, service_type, status, cert_status, memo, tgsend, st_tgsend, site_id, cf_hosted, cf_account_id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
                             domain.domain,
                             domain.registrar || '',
                             domain.registrar_link || '',
@@ -1162,7 +1284,9 @@ const startServer = async () => {
                             domain.memo || '',
                             domain.tgsend || 0,
                             domain.st_tgsend || 0,
-                            domain.site_id || null
+                            domain.site_id || null,
+                            Number(domain.cf_hosted || 0),
+                            domain.cf_account_id || null
                         ])
                     }
                     shouldNotifyCertStatus = true
@@ -1253,6 +1377,63 @@ const startServer = async () => {
             return res.json({ status: 200, message: '获取成功', data: files })
         } catch (error) {
             return res.status(500).json({ status: 500, message: '获取失败', data: [] })
+        }
+    })
+
+    app.get('/api/cf-accounts', (_req, res) => {
+        try {
+            const rows = readRows('SELECT id, email, token FROM cf_accounts ORDER BY created_at DESC')
+            const masked = rows.map((row) => ({
+                id: row.id,
+                email: row.email,
+                token: maskToken(row.token)
+            }))
+            return res.json({ status: 200, message: '获取成功', data: masked })
+        } catch (error) {
+            return res.status(500).json({ status: 500, message: '获取失败', data: [] })
+        }
+    })
+
+    app.post('/api/cf-accounts', (req, res) => {
+        try {
+            const data = req.body || {}
+            if (!data.email || !data.token) {
+                return res.status(400).json({ status: 400, message: 'email 和 token 是必填字段', data: null })
+            }
+            const existing = readRow('SELECT id FROM cf_accounts WHERE email = ?', [data.email])
+            if (existing) {
+                return res.status(409).json({ status: 409, message: '账号已存在', data: null })
+            }
+            run('INSERT INTO cf_accounts (email, token) VALUES (?, ?)', [data.email, data.token])
+            const created = readRow('SELECT id, email, token FROM cf_accounts WHERE id = last_insert_rowid()')
+            persistDb()
+            return res.json({
+                status: 200,
+                message: '创建成功',
+                data: { id: created.id, email: created.email, token: maskToken(created.token) }
+            })
+        } catch (error) {
+            return res.status(500).json({ status: 500, message: '创建失败', data: null })
+        }
+    })
+
+    app.delete('/api/cf-accounts', (req, res) => {
+        try {
+            const data = req.body || {}
+            const ids = Array.isArray(data.ids) ? data.ids.filter(Boolean) : []
+            if (ids.length === 0) {
+                return res.status(400).json({ status: 400, message: 'ids 是必填字段', data: null })
+            }
+            const placeholders = ids.map(() => '?').join(',')
+            const usage = readRow(`SELECT COUNT(1) as count FROM domains WHERE cf_account_id IN (${placeholders})`, ids)
+            if (usage?.count > 0) {
+                return res.status(400).json({ status: 400, message: '存在已绑定的域名，无法删除', data: null })
+            }
+            run(`DELETE FROM cf_accounts WHERE id IN (${placeholders})`, ids)
+            persistDb()
+            return res.json({ status: 200, message: '删除成功', data: null })
+        } catch (error) {
+            return res.status(500).json({ status: 500, message: '删除失败', data: null })
         }
     })
 
@@ -1406,16 +1587,18 @@ const startServer = async () => {
             if (!dateRegex.test(data.registrar_date) || !dateRegex.test(data.expiry_date)) {
                 return res.status(400).json({ status: 400, message: '日期格式不正确，应为 YYYY-MM-DD', data: null })
             }
-            const existing = readRow('SELECT id, cert_status FROM domains WHERE domain = ?', [data.domain])
+            const existing = readRow('SELECT id, cert_status, cf_hosted, cf_account_id FROM domains WHERE domain = ?', [data.domain])
             if (existing) {
                 const nextCertStatus = data.cert_status || (data.service_type === '伪装网站' ? '申请中' : '无')
                 run(`UPDATE domains 
-                    SET service_type = ?, status = ?, cert_status = ?, memo = ?
+                    SET service_type = ?, status = ?, cert_status = ?, memo = ?, cf_hosted = ?, cf_account_id = ?
                     WHERE domain = ?`, [
                     data.service_type,
                     data.status,
                     nextCertStatus,
                     data.memo,
+                    Number(data.cf_hosted || 0),
+                    data.cf_account_id || null,
                     data.domain
                 ])
                 const updatedDomain = readRow('SELECT * FROM domains WHERE domain = ?', [data.domain])
@@ -1428,8 +1611,8 @@ const startServer = async () => {
             const initialCertStatus = data.cert_status || (data.service_type === '伪装网站' ? '申请中' : '无')
             run(`INSERT INTO domains (
                 domain, registrar, registrar_link, registrar_date,
-                expiry_date, service_type, status, cert_status, tgsend, st_tgsend, memo
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                expiry_date, service_type, status, cert_status, tgsend, st_tgsend, cf_hosted, cf_account_id, memo
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
                 data.domain,
                 data.registrar,
                 data.registrar_link || '',
@@ -1440,6 +1623,8 @@ const startServer = async () => {
                 initialCertStatus,
                 data.tgsend ?? 1,
                 data.st_tgsend ?? 0,
+                Number(data.cf_hosted || 0),
+                data.cf_account_id || null,
                 data.memo || ''
             ])
             const newDomain = readRow('SELECT * FROM domains WHERE id = last_insert_rowid()')

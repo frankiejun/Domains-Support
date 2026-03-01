@@ -15,6 +15,8 @@ export interface DomainData {
     tgsend: number
     st_tgsend: number
     site_id?: number | null
+    cf_hosted?: number
+    cf_account_id?: number | null
     memo: string
     created_at?: string
 }

@@ -33,6 +33,16 @@
                     <el-option v-for="site in websites" :key="site.id" :label="site.name" :value="site.id" />
                 </el-select>
             </el-form-item>
+            <el-form-item v-if="form.service_type === '伪装网站'" label="托管CF">
+                <el-switch v-model="form.cf_hosted" :active-value="1" :inactive-value="0" inline-prompt active-text="是"
+                    inactive-text="否" id="cf-hosted-input" autocomplete="off" />
+            </el-form-item>
+            <el-form-item v-if="form.service_type === '伪装网站' && form.cf_hosted === 1" label="CF账号" prop="cf_account_id">
+                <el-select v-model="form.cf_account_id" placeholder="请选择CF账号" id="cf-account-input" autocomplete="off"
+                    clearable>
+                    <el-option v-for="account in cfAccounts" :key="account.id" :label="account.email" :value="account.id" />
+                </el-select>
+            </el-form-item>
             <el-form-item v-if="form.service_type === '伪装网站'">
                 <div class="site-hint">
                     域名 DNS 需要添加本服务器的 A 记录，当前服务器 IP：{{ serverIp || '未获取' }}
@@ -81,6 +91,8 @@ interface DomainForm {
     tgsend: number
     st_tgsend: number
     site_id?: number | null
+    cf_hosted: number
+    cf_account_id?: number | null
     memo: string
 }
 
@@ -89,6 +101,7 @@ const props = defineProps<{
     isEdit: boolean
     editData?: DomainForm
     websites?: { id: number; name: string; filename: string }[]
+    cfAccounts?: { id: number; email: string }[]
     serverIp?: string
 }>()
 
@@ -97,6 +110,7 @@ const emit = defineEmits(['update:visible', 'submit'])
 const dialogVisible = ref(props.visible)
 const formRef = ref<FormInstance>()
 const websites = computed(() => props.websites || [])
+const cfAccounts = computed(() => props.cfAccounts || [])
 
 const parseBaseDate = (baseDate: string) => {
     const parsed = new Date(baseDate)
@@ -135,6 +149,8 @@ const defaultForm: DomainForm = {
     tgsend: 1,
     st_tgsend: 0,
     site_id: null,
+    cf_hosted: 0,
+    cf_account_id: null,
     memo: ''
 }
 
@@ -177,6 +193,22 @@ const rules = {
             },
             trigger: ['change'] as const
         }
+    ],
+    cf_account_id: [
+        {
+            validator: (_rule: unknown, value: number, callback: (error?: Error) => void) => {
+                if (form.value.service_type !== '伪装网站' || form.value.cf_hosted !== 1) {
+                    callback()
+                    return
+                }
+                if (!value) {
+                    callback(new Error('请选择CF账号'))
+                    return
+                }
+                callback()
+            },
+            trigger: ['change'] as const
+        }
     ]
 } satisfies FormRules
 
@@ -207,9 +239,17 @@ watch(() => props.editData, (newVal: DomainForm | undefined) => {
     }
 }, { immediate: true })
 
-watch(() => form.value.service_type, (value) => {
+watch(() => form.value.service_type, (value: string) => {
     if (value !== '伪装网站') {
         form.value.site_id = null
+        form.value.cf_hosted = 0
+        form.value.cf_account_id = null
+    }
+})
+
+watch(() => form.value.cf_hosted, (value: number) => {
+    if (value !== 1) {
+        form.value.cf_account_id = null
     }
 })
 
@@ -223,7 +263,7 @@ const handleCancel = () => {
 const handleSubmit = async () => {
     if (!formRef.value) return
 
-    await formRef.value.validate((valid, fields) => {
+    await formRef.value.validate((valid: boolean, fields: Record<string, unknown> | undefined) => {
         if (valid) {
             emit('submit', form.value)
             dialogVisible.value = false

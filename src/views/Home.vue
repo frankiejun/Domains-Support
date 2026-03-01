@@ -144,10 +144,10 @@
         </div>
 
         <DomainDialog v-model:visible="dialogVisible" :is-edit="isEdit" :edit-data="editData"
-            :websites="websiteConfigs" :server-ip="serverIp" @submit="handleDialogSubmit" />
+            :websites="websiteConfigs" :cf-accounts="cfAccounts" :server-ip="serverIp" @submit="handleDialogSubmit" />
 
         <AlertConfigDialog v-model:visible="configVisible" :config="alertConfig" @submit="handleConfigSubmit"
-            @websites-updated="loadWebsiteConfigs" />
+            @websites-updated="loadWebsiteConfigs" @cf-accounts-updated="loadCfAccounts" />
 
         <ImportDialog v-model:visible="importVisible" @success="loadDomains" />
 
@@ -192,6 +192,7 @@ import ImportDialog from '../components/ImportDialog.vue'
 import { useAuth } from '../utils/auth'
 
 type Domain = DomainData
+type DomainEditData = DomainData & { cf_hosted: number; cf_account_id?: number | null }
 
 interface AlertConfig {
     tg_token: string
@@ -208,6 +209,11 @@ interface WebsiteConfig {
     name: string
     filename: string
 }
+interface CfAccount {
+    id: number
+    email: string
+    token: string
+}
 interface ApiResponse<T = any> {
     status: number
     message: string
@@ -220,6 +226,7 @@ const domains = ref<Domain[]>([])
 const alertDays = ref(30)
 const alertConfig = ref<AlertConfig>()
 const websiteConfigs = ref<WebsiteConfig[]>([])
+const cfAccounts = ref<CfAccount[]>([])
 const serverIp = ref('')
 const refreshingTable = ref(false)
 const refreshingStatus = ref(false)
@@ -279,7 +286,7 @@ const formatExpiryDate = (expiryDate: string) => {
 const dialogVisible = ref(false)
 const configVisible = ref(false)
 const isEdit = ref(false)
-const editData = ref<Domain>()
+const editData = ref<DomainEditData>()
 const importVisible = ref(false)
 const domainTableRef = ref()
 const copyMode = ref(false)
@@ -330,6 +337,8 @@ const handleCopyAdd = () => {
         tgsend: row.tgsend,
         st_tgsend: row.st_tgsend,
         site_id: row.site_id,
+        cf_hosted: row.cf_hosted ?? 0,
+        cf_account_id: row.cf_account_id ?? null,
         memo: row.memo
     }
     dialogVisible.value = true
@@ -424,7 +433,11 @@ const handleCopyInfo = () => {
 
 const handleEdit = (row: Domain) => {
     isEdit.value = true
-    editData.value = row
+    editData.value = {
+        ...row,
+        cf_hosted: row.cf_hosted ?? 0,
+        cf_account_id: row.cf_account_id ?? null
+    }
     dialogVisible.value = true
 }
 
@@ -736,6 +749,28 @@ const loadWebsiteConfigs = async () => {
     }
 }
 
+const loadCfAccounts = async () => {
+    try {
+        const authData = auth.getAuthToken()
+        if (!authData) {
+            throw new Error('未登录或登录已过期')
+        }
+        const response = await fetch('/api/cf-accounts', {
+            headers: {
+                'Authorization': `Bearer ${authData.token}`,
+                'Content-Type': 'application/json'
+            }
+        })
+        const result = await response.json() as ApiResponse<CfAccount[]>
+        if (result.status !== 200) {
+            throw new Error(result.message || '获取CF账号失败')
+        }
+        cfAccounts.value = result.data || []
+    } catch (error: unknown) {
+        console.error('获取CF账号失败:', error)
+    }
+}
+
 const loadServerIp = async () => {
     try {
         const authData = auth.getAuthToken()
@@ -876,6 +911,7 @@ onMounted(() => {
     loadDomains()
     loadAlertConfig()
     loadWebsiteConfigs()
+    loadCfAccounts()
     loadServerIp()
     connectCertStatusStream()
 })

@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS domains (
     tgsend  INTEGER DEFAULT 0,
     st_tgsend INTEGER DEFAULT 1,
     site_id INTEGER,
+    cf_hosted INTEGER DEFAULT 0,
+    cf_account_id INTEGER,
     memo TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 ); 
@@ -36,5 +38,11 @@ CREATE TABLE IF NOT EXISTS websitecfg (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     filename TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS cf_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    token TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

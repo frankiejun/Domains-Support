@@ -18,6 +18,46 @@
                         <el-input v-model="form.wx_token" placeholder="请输入 WX-token" id="wx-token-input" />
                     </el-form-item>
                 </el-collapse-item>
+                <el-collapse-item title="静态网站" name="3">
+                    <el-form-item label="网站名称">
+                        <el-input v-model="newWebsite.name" placeholder="请输入网站名称" id="website-name-input" />
+                    </el-form-item>
+                    <el-form-item label="文件名">
+                        <el-select v-model="newWebsite.filename" placeholder="请选择文件" id="website-file-input" clearable>
+                            <el-option v-for="file in websiteFiles" :key="file" :label="file" :value="file" />
+                        </el-select>
+                    </el-form-item>
+                    <el-form-item>
+                        <el-button type="primary" @click="handleAddWebsite">新增</el-button>
+                        <el-button type="danger" :disabled="selectedWebsites.length === 0" @click="handleDeleteWebsites">
+                            删除
+                        </el-button>
+                    </el-form-item>
+                    <el-table :data="websites" border style="width: 100%" @selection-change="handleWebsiteSelectionChange">
+                        <el-table-column type="selection" width="55" />
+                        <el-table-column prop="name" label="网站名称" />
+                        <el-table-column prop="filename" label="文件名" />
+                    </el-table>
+                </el-collapse-item>
+                <el-collapse-item title="CF账号" name="4">
+                    <el-form-item label="账号email">
+                        <el-input v-model="newCfAccount.email" placeholder="请输入账号email" id="cf-email-input" />
+                    </el-form-item>
+                    <el-form-item label="全局token">
+                        <el-input v-model="newCfAccount.token" placeholder="请输入全局token" id="cf-token-input" />
+                    </el-form-item>
+                    <el-form-item>
+                        <el-button type="primary" @click="handleAddCfAccount">增加</el-button>
+                        <el-button type="danger" :disabled="selectedCfAccounts.length === 0" @click="handleDeleteCfAccounts">
+                            删除
+                        </el-button>
+                    </el-form-item>
+                    <el-table :data="cfAccounts" border style="width: 100%" @selection-change="handleCfAccountSelectionChange">
+                        <el-table-column type="selection" width="55" />
+                        <el-table-column prop="email" label="账号email" />
+                        <el-table-column prop="token" label="token" />
+                    </el-table>
+                </el-collapse-item>
             </el-collapse>
             <el-form-item label="剩余多少天告警" prop="days">
                 <el-input-number v-model="form.days" :min="1" :max="365" id="days-input" />
@@ -29,26 +69,6 @@
             <el-form-item v-if="form.auto_check_enabled === 1" label="每隔多少分钟检查" prop="auto_check_interval">
                 <el-input-number v-model="form.auto_check_interval" :min="1" :max="1440" id="auto-check-interval-input" />
             </el-form-item>
-            <el-divider content-position="left">静态网站</el-divider>
-            <el-form-item label="网站名称">
-                <el-input v-model="newWebsite.name" placeholder="请输入网站名称" id="website-name-input" />
-            </el-form-item>
-            <el-form-item label="文件名">
-                <el-select v-model="newWebsite.filename" placeholder="请选择文件" id="website-file-input" clearable>
-                    <el-option v-for="file in websiteFiles" :key="file" :label="file" :value="file" />
-                </el-select>
-            </el-form-item>
-            <el-form-item>
-                <el-button type="primary" @click="handleAddWebsite">新增</el-button>
-                <el-button type="danger" :disabled="selectedWebsites.length === 0" @click="handleDeleteWebsites">
-                    删除
-                </el-button>
-            </el-form-item>
-            <el-table :data="websites" border style="width: 100%" @selection-change="handleWebsiteSelectionChange">
-                <el-table-column type="selection" width="55" />
-                <el-table-column prop="name" label="网站名称" />
-                <el-table-column prop="filename" label="文件名" />
-            </el-table>
         </el-form>
         <template #footer>
             <span class="dialog-footer">
@@ -80,11 +100,11 @@ const props = defineProps<{
     config?: AlertConfigForm
 }>()
 
-const emit = defineEmits(['update:visible', 'submit', 'websites-updated'])
+const emit = defineEmits(['update:visible', 'submit', 'websites-updated', 'cf-accounts-updated'])
 
 const dialogVisible = ref(props.visible)
 const formRef = ref<FormInstance>()
-const activeNames = ref(['1', '2'])
+const activeNames = ref(['1', '2', '3', '4'])
 
 const form = ref<AlertConfigForm>({
     tg_token: '',
@@ -107,13 +127,23 @@ const websiteFiles = ref<string[]>([])
 const selectedWebsites = ref<WebsiteConfig[]>([])
 const newWebsite = ref({ name: '', filename: '' })
 
+interface CfAccount {
+    id: number
+    email: string
+    token: string
+}
+
+const cfAccounts = ref<CfAccount[]>([])
+const selectedCfAccounts = ref<CfAccount[]>([])
+const newCfAccount = ref({ email: '', token: '' })
+
 const rules = {
     days: [
         { required: true, message: '请输入告警天数', trigger: 'change' }
     ],
     auto_check_interval: [
         {
-            validator: (_rule, value, callback) => {
+            validator: (_rule: unknown, value: number, callback: (error?: Error) => void) => {
                 if (form.value.auto_check_enabled !== 1) {
                     callback()
                     return
@@ -129,19 +159,20 @@ const rules = {
     ]
 } satisfies FormRules
 
-watch(() => props.visible, (newVal) => {
+watch(() => props.visible, (newVal: boolean) => {
     dialogVisible.value = newVal
 })
 
-watch(dialogVisible, (newVal) => {
+watch(dialogVisible, (newVal: boolean) => {
     emit('update:visible', newVal)
     if (newVal) {
         loadWebsiteConfigs()
         loadWebsiteFiles()
+        loadCfAccounts()
     }
 })
 
-watch(() => props.config, (newVal) => {
+watch(() => props.config, (newVal: AlertConfigForm | undefined) => {
     if (newVal) {
         form.value = { ...form.value, ...newVal }
     }
@@ -150,7 +181,7 @@ watch(() => props.config, (newVal) => {
 const handleSubmit = async () => {
     if (!formRef.value) return
 
-    await formRef.value.validate((valid) => {
+    await formRef.value.validate((valid: boolean) => {
         if (valid) {
             emit('submit', form.value)
             dialogVisible.value = false
@@ -257,7 +288,7 @@ const handleDeleteWebsites = async () => {
                 'Authorization': `Bearer ${authData.token}`,
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ ids: selectedWebsites.value.map((item) => item.id) })
+            body: JSON.stringify({ ids: selectedWebsites.value.map((item: WebsiteConfig) => item.id) })
         })
         const result = await response.json() as { status: number; message: string }
         if (result.status !== 200) {
@@ -267,6 +298,98 @@ const handleDeleteWebsites = async () => {
         await loadWebsiteConfigs()
         emit('websites-updated')
         ElMessage.success('删除成功')
+    } catch (error) {
+        ElMessage.error(error instanceof Error ? error.message : '删除失败')
+    }
+}
+
+const loadCfAccounts = async () => {
+    try {
+        const auth = useAuth()
+        const authData = auth.getAuthToken()
+        if (!authData) {
+            throw new Error('未登录或登录已过期')
+        }
+        const response = await fetch('/api/cf-accounts', {
+            headers: {
+                'Authorization': `Bearer ${authData.token}`,
+                'Content-Type': 'application/json'
+            }
+        })
+        const result = await response.json() as { status: number; message: string; data: CfAccount[] }
+        if (result.status !== 200) {
+            throw new Error(result.message || '获取失败')
+        }
+        cfAccounts.value = result.data || []
+    } catch (error) {
+        ElMessage.error(error instanceof Error ? error.message : '获取失败')
+    }
+}
+
+const handleAddCfAccount = async () => {
+    try {
+        if (!newCfAccount.value.email || !newCfAccount.value.token) {
+            ElMessage.warning('请输入账号和token')
+            return
+        }
+        const auth = useAuth()
+        const authData = auth.getAuthToken()
+        if (!authData) {
+            throw new Error('未登录或登录已过期')
+        }
+        const response = await fetch('/api/cf-accounts', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${authData.token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(newCfAccount.value)
+        })
+        const result = await response.json() as { status: number; message: string; data: CfAccount }
+        if (result.status !== 200) {
+            throw new Error(result.message || '创建失败')
+        }
+        ElMessage.success('新增成功')
+        newCfAccount.value = { email: '', token: '' }
+        await loadCfAccounts()
+        emit('cf-accounts-updated')
+    } catch (error) {
+        ElMessage.error(error instanceof Error ? error.message : '创建失败')
+    }
+}
+
+const handleCfAccountSelectionChange = (selection: CfAccount[]) => {
+    selectedCfAccounts.value = selection
+}
+
+const handleDeleteCfAccounts = async () => {
+    try {
+        if (selectedCfAccounts.value.length === 0) {
+            ElMessage.warning('请选择要删除的账号')
+            return
+        }
+        const auth = useAuth()
+        const authData = auth.getAuthToken()
+        if (!authData) {
+            throw new Error('未登录或登录已过期')
+        }
+        const ids = selectedCfAccounts.value.map((item: CfAccount) => item.id)
+        const response = await fetch('/api/cf-accounts', {
+            method: 'DELETE',
+            headers: {
+                'Authorization': `Bearer ${authData.token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ ids })
+        })
+        const result = await response.json() as { status: number; message: string }
+        if (result.status !== 200) {
+            throw new Error(result.message || '删除失败')
+        }
+        ElMessage.success('删除成功')
+        selectedCfAccounts.value = []
+        await loadCfAccounts()
+        emit('cf-accounts-updated')
     } catch (error) {
         ElMessage.error(error instanceof Error ? error.message : '删除失败')
     }
