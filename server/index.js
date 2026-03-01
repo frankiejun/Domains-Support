@@ -542,7 +542,14 @@ const cfRequest = async (token, url, options = {}, email) => {
         return await send(false)
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        if (email && message.includes('Invalid request headers')) {
+        const shouldFallback = [
+            'Invalid request headers',
+            'Unable to authenticate request',
+            'Invalid API token',
+            'Invalid API key',
+            'Authentication error'
+        ].some((text) => message.includes(text))
+        if (email && shouldFallback) {
             return await send(true)
         }
         throw error
