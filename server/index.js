@@ -648,6 +648,13 @@ const processCertQueue = async () => {
     certQueueProcessing = true
     try {
         const domainRow = readRow('SELECT cf_hosted, cf_account_id FROM domains WHERE domain = ?', [task.domain])
+        const site = readRow('SELECT * FROM websitecfg WHERE id = ?', [task.siteId])
+        if (!site) {
+            updateCertStatus(task.domain, '失败', { retryAt: null, retryCount: 0 })
+            appendLog('nginx', `skip binding for ${task.domain}: site not found ${task.siteId}`)
+            return
+        }
+        await writeNginxConfig(task.domain, site.filename)
         const dnsOk = await isDnsPointingToServer(task.domain)
         if (!dnsOk) {
             updateCertStatus(task.domain, '未设置DNS', { retryAt: null, retryCount: 0 })
@@ -665,13 +672,6 @@ const processCertQueue = async () => {
             appendLog('certbot', `skip for ${task.domain}: cert exists`)
             return
         }
-        const site = readRow('SELECT * FROM websitecfg WHERE id = ?', [task.siteId])
-        if (!site) {
-            updateCertStatus(task.domain, '失败', { retryAt: null, retryCount: 0 })
-            appendLog('nginx', `skip binding for ${task.domain}: site not found ${task.siteId}`)
-            return
-        }
-        await writeNginxConfig(task.domain, site.filename)
         await applyCertbot(task.domain)
     } catch (error) {
         updateCertStatus(task.domain, '失败', { retryAt: null, retryCount: 0 })
