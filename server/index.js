@@ -817,21 +817,48 @@ const sendTelegramMessage = async (token, chatId, message) => {
         throw new Error('Telegram token 或 chat ID 未配置')
     }
     const url = `https://api.telegram.org/bot${token}/sendMessage`
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            chat_id: chatId,
-            text: message,
-            parse_mode: 'Markdown'
-        })
-    })
-    const responseData = await response.json()
-    if (!response.ok) {
-        throw new Error(`Failed to send Telegram message: ${response.statusText}, Details: ${JSON.stringify(responseData)}`)
+    const maxRetries = 3
+    const retryDelays = [3000, 6000, 12000]
+    let lastError = null
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const controller = new AbortController()
+            const timeoutId = setTimeout(() => controller.abort(), 15000)
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    chat_id: chatId,
+                    text: message,
+                    parse_mode: 'Markdown'
+                }),
+                signal: controller.signal
+            })
+            clearTimeout(timeoutId)
+            const responseData = await response.json()
+            if (!response.ok) {
+                throw new Error(`Telegram API error ${response.status}: ${response.statusText}, Details: ${JSON.stringify(responseData)}`)
+            }
+            if (attempt > 1) {
+                console.log(`[Telegram] 第${attempt}次重试发送成功`)
+            }
+            return
+        } catch (error) {
+            lastError = error
+            const errMsg = error instanceof Error ? error.message : String(error)
+            const errCause = error?.cause ? `, cause: ${error.cause?.code || error.cause?.message || JSON.stringify(error.cause)}` : ''
+            const errName = error?.name ? `, type: ${error.name}` : ''
+            console.log(`[Telegram] 第${attempt}/${maxRetries}次发送失败: ${errMsg}${errName}${errCause}`)
+            if (attempt < maxRetries) {
+                const delay = retryDelays[attempt - 1]
+                console.log(`[Telegram] ${delay / 1000}秒后重试...`)
+                await new Promise((resolve) => setTimeout(resolve, delay))
+            }
+        }
     }
+    throw lastError || new Error('Telegram 消息发送失败')
 }
 
 const sendWeChatMessage = async (apiUrl, token, title, text) => {
@@ -905,19 +932,25 @@ const checkAndNotifyDomains = async () => {
     if (offlineDomains.length > 0) {
         const offlineDetails = offlineDomains.map((d) => `\`${d.domain}\``).join('\n')
         const message = `*🔔 Domains-Support 通知*\n\n⚠️ *域名服务离线告警*\n\n以下域名无法访问，请立即检查：\n${offlineDetails}\n\n⏰ 时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
-        try {
-            if (config.tg_token && config.tg_userid) {
+        if (config.tg_token && config.tg_userid) {
+            try {
                 console.log(`[checkAndNotify] 发送Telegram离线告警: ${offlineDomains.map(d => d.domain).join(', ')}`)
                 await sendTelegramMessage(config.tg_token, config.tg_userid, message)
                 console.log('[checkAndNotify] Telegram离线告警发送成功')
-            } else {
-                console.log('[checkAndNotify] Telegram未配置, 跳过离线告警发送')
+            } catch (error) {
+                console.log(`[checkAndNotify] Telegram离线告警发送失败: ${error instanceof Error ? error.message : String(error)}`)
             }
-            if (config.wx_api && config.wx_token) {
+        } else {
+            console.log('[checkAndNotify] Telegram未配置, 跳过离线告警发送')
+        }
+        if (config.wx_api && config.wx_token) {
+            try {
+                console.log(`[checkAndNotify] 发送WeChat离线告警: ${offlineDomains.map(d => d.domain).join(', ')}`)
                 await sendWeChatMessage(config.wx_api, config.wx_token, '域名服务离线告警', message)
+                console.log('[checkAndNotify] WeChat离线告警发送成功')
+            } catch (error) {
+                console.log(`[checkAndNotify] WeChat离线告警发送失败: ${error instanceof Error ? error.message : String(error)}`)
             }
-        } catch (error) {
-            console.log(`[checkAndNotify] 离线告警发送失败: ${error instanceof Error ? error.message : String(error)}`)
         }
     }
     if (expiringDomains.length > 0) {
@@ -925,19 +958,25 @@ const checkAndNotifyDomains = async () => {
             .map((d) => `\`${d.domain}\` (还剩 ${d.remainingDays} 天, ${d.expiry_date})`)
             .join('\n')
         const message = `*🔔 Domains-Support 通知*\n\n⚠️ *域名即将过期提醒*\n\n以下域名即将在 ${config.days} 天内过期，请及时续费：\n${expiringDetails}\n\n⏰ 时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
-        try {
-            if (config.tg_token && config.tg_userid) {
+        if (config.tg_token && config.tg_userid) {
+            try {
                 console.log(`[checkAndNotify] 发送Telegram到期提醒: ${expiringDomains.map(d => `${d.domain}(${d.remainingDays}天)`).join(', ')}`)
                 await sendTelegramMessage(config.tg_token, config.tg_userid, message)
                 console.log('[checkAndNotify] Telegram到期提醒发送成功')
-            } else {
-                console.log('[checkAndNotify] Telegram未配置, 跳过到期提醒发送')
+            } catch (error) {
+                console.log(`[checkAndNotify] Telegram到期提醒发送失败: ${error instanceof Error ? error.message : String(error)}`)
             }
-            if (config.wx_api && config.wx_token) {
+        } else {
+            console.log('[checkAndNotify] Telegram未配置, 跳过到期提醒发送')
+        }
+        if (config.wx_api && config.wx_token) {
+            try {
+                console.log(`[checkAndNotify] 发送WeChat到期提醒: ${expiringDomains.map(d => `${d.domain}(${d.remainingDays}天)`).join(', ')}`)
                 await sendWeChatMessage(config.wx_api, config.wx_token, '域名即将过期提醒', message)
+                console.log('[checkAndNotify] WeChat到期提醒发送成功')
+            } catch (error) {
+                console.log(`[checkAndNotify] WeChat到期提醒发送失败: ${error instanceof Error ? error.message : String(error)}`)
             }
-        } catch (error) {
-            console.log(`[checkAndNotify] 到期提醒发送失败: ${error instanceof Error ? error.message : String(error)}`)
         }
     }
     if (offlineDomains.length === 0 && expiringDomains.length === 0) {
@@ -1614,14 +1653,19 @@ const startServer = async () => {
             if (offlineDomains.length > 0) {
                 const offlineDetails = offlineDomains.map((d) => `\`${d.domain}\``).join('\n')
                 const message = `*🔔 Domains-Support 通知*\n\n⚠️ *域名服务离线告警*\n\n以下域名无法访问，请立即检查：\n${offlineDetails}\n\n⏰ 时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
-                try {
-                    if (config.tg_token && config.tg_userid) {
+                if (config.tg_token && config.tg_userid) {
+                    try {
                         await sendTelegramMessage(config.tg_token, config.tg_userid, message)
+                    } catch (error) {
+                        console.log(`[handleCheck] Telegram离线告警发送失败: ${error instanceof Error ? error.message : String(error)}`)
                     }
-                    if (config.wx_api && config.wx_token) {
+                }
+                if (config.wx_api && config.wx_token) {
+                    try {
                         await sendWeChatMessage(config.wx_api, config.wx_token, '域名服务离线告警', message)
+                    } catch (error) {
+                        console.log(`[handleCheck] WeChat离线告警发送失败: ${error instanceof Error ? error.message : String(error)}`)
                     }
-                } catch (error) {
                 }
             }
             if (expiringDomains.length > 0) {
@@ -1629,20 +1673,25 @@ const startServer = async () => {
                     .map((d) => `\`${d.domain}\` (还剩 ${d.remainingDays} 天, ${d.expiry_date})`)
                     .join('\n')
                 const message = `*🔔 Domains-Support 通知*\n\n⚠️ *域名即将过期提醒*\n\n以下域名即将在 ${config.days} 天内过期，请及时续费：\n${expiringDetails}\n\n⏰ 时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
-                try {
-                    if (config.tg_token && config.tg_userid) {
+                if (config.tg_token && config.tg_userid) {
+                    try {
                         await sendTelegramMessage(config.tg_token, config.tg_userid, message)
+                    } catch (error) {
+                        console.log(`[handleCheck] Telegram到期提醒发送失败: ${error instanceof Error ? error.message : String(error)}`)
                     }
-                    if (config.wx_api && config.wx_token) {
-                        await sendWeChatMessage(config.wx_api, config.wx_token, '域名即将过期提醒', message)
-                    }
-                    notifiedDomains.push(...expiringDomains.map((d) => ({
-                        domain: d.domain,
-                        remainingDays: d.remainingDays,
-                        expiry_date: d.expiry_date
-                    })))
-                } catch (error) {
                 }
+                if (config.wx_api && config.wx_token) {
+                    try {
+                        await sendWeChatMessage(config.wx_api, config.wx_token, '域名即将过期提醒', message)
+                    } catch (error) {
+                        console.log(`[handleCheck] WeChat到期提醒发送失败: ${error instanceof Error ? error.message : String(error)}`)
+                    }
+                }
+                notifiedDomains.push(...expiringDomains.map((d) => ({
+                    domain: d.domain,
+                    remainingDays: d.remainingDays,
+                    expiry_date: d.expiry_date
+                })))
             }
             persistDb()
             return res.json({
