@@ -104,7 +104,7 @@ const emit = defineEmits(['update:visible', 'submit', 'websites-updated', 'cf-ac
 
 const dialogVisible = ref(props.visible)
 const formRef = ref<FormInstance>()
-const activeNames = ref(['1', '2', '3', '4'])
+const activeNames = ref<string[]>([])
 
 const form = ref<AlertConfigForm>({
     tg_token: '',
