@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS domains (
     cert_status TEXT NOT NULL DEFAULT '无',
     cert_retry_count INTEGER DEFAULT 0,
     cert_retry_at TEXT,
-    tgsend  INTEGER DEFAULT 0,
+    tgsend  INTEGER DEFAULT 1,
     st_tgsend INTEGER DEFAULT 1,
     site_id INTEGER,
     cf_hosted INTEGER DEFAULT 0,

@@ -119,7 +119,7 @@ const ensureSchema = () => {
         cert_status TEXT NOT NULL DEFAULT '无',
         cert_retry_count INTEGER DEFAULT 0,
         cert_retry_at TEXT,
-        tgsend INTEGER DEFAULT 0,
+        tgsend INTEGER DEFAULT 1,
         st_tgsend INTEGER DEFAULT 1,
         site_id INTEGER,
         cf_hosted INTEGER DEFAULT 0,
@@ -878,34 +878,46 @@ const checkAllDomains = async () => {
 }
 
 const checkAndNotifyDomains = async () => {
+    console.log('[checkAndNotify] 开始执行定时检查...')
     const config = readRow('SELECT * FROM alertcfg LIMIT 1')
     if (!config) {
+        console.log('[checkAndNotify] 未找到告警配置(alertcfg), 跳过')
         return { total: 0, notified: 0 }
     }
+    console.log(`[checkAndNotify] 告警配置: days=${config.days}, tg_token=${config.tg_token ? '已配置' : '未配置'}, tg_userid=${config.tg_userid || '未配置'}, auto_check_enabled=${config.auto_check_enabled}, interval=${config.auto_check_interval}分钟`)
     const domains = readRows('SELECT domain, expiry_date, tgsend, st_tgsend FROM domains WHERE tgsend = 1 OR st_tgsend = 1')
     if (domains.length === 0) {
+        console.log('[checkAndNotify] 没有开启通知的域名, 跳过')
         return { total: 0, notified: 0 }
     }
+    console.log(`[checkAndNotify] 共有 ${domains.length} 个域名需要检查`)
     const results = await runWithConcurrency(domains, 10, async (domain) => {
         const remainingDays = calculateRemainingDays(domain.expiry_date)
         const isOnline = await checkDomainStatus(domain.domain)
         const status = isOnline ? '在线' : '离线'
         run('UPDATE domains SET status = ? WHERE domain = ?', [status, domain.domain])
+        console.log(`[checkAndNotify]   ${domain.domain}: 状态=${status}, 剩余=${remainingDays}天, 到期日=${domain.expiry_date}, tgsend=${domain.tgsend}, st_tgsend=${domain.st_tgsend}`)
         return { ...domain, status, remainingDays }
     })
     const offlineDomains = results.filter((d) => d.status === '离线' && d.st_tgsend === 1)
     const expiringDomains = results.filter((d) => d.remainingDays <= config.days && d.tgsend === 1)
+    console.log(`[checkAndNotify] 检查结果: 离线=${offlineDomains.length}个, 即将过期=${expiringDomains.length}个 (阈值<=${config.days}天)`)
     if (offlineDomains.length > 0) {
         const offlineDetails = offlineDomains.map((d) => `\`${d.domain}\``).join('\n')
         const message = `*🔔 Domains-Support 通知*\n\n⚠️ *域名服务离线告警*\n\n以下域名无法访问，请立即检查：\n${offlineDetails}\n\n⏰ 时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
         try {
             if (config.tg_token && config.tg_userid) {
+                console.log(`[checkAndNotify] 发送Telegram离线告警: ${offlineDomains.map(d => d.domain).join(', ')}`)
                 await sendTelegramMessage(config.tg_token, config.tg_userid, message)
+                console.log('[checkAndNotify] Telegram离线告警发送成功')
+            } else {
+                console.log('[checkAndNotify] Telegram未配置, 跳过离线告警发送')
             }
             if (config.wx_api && config.wx_token) {
                 await sendWeChatMessage(config.wx_api, config.wx_token, '域名服务离线告警', message)
             }
         } catch (error) {
+            console.log(`[checkAndNotify] 离线告警发送失败: ${error instanceof Error ? error.message : String(error)}`)
         }
     }
     if (expiringDomains.length > 0) {
@@ -915,13 +927,21 @@ const checkAndNotifyDomains = async () => {
         const message = `*🔔 Domains-Support 通知*\n\n⚠️ *域名即将过期提醒*\n\n以下域名即将在 ${config.days} 天内过期，请及时续费：\n${expiringDetails}\n\n⏰ 时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
         try {
             if (config.tg_token && config.tg_userid) {
+                console.log(`[checkAndNotify] 发送Telegram到期提醒: ${expiringDomains.map(d => `${d.domain}(${d.remainingDays}天)`).join(', ')}`)
                 await sendTelegramMessage(config.tg_token, config.tg_userid, message)
+                console.log('[checkAndNotify] Telegram到期提醒发送成功')
+            } else {
+                console.log('[checkAndNotify] Telegram未配置, 跳过到期提醒发送')
             }
             if (config.wx_api && config.wx_token) {
                 await sendWeChatMessage(config.wx_api, config.wx_token, '域名即将过期提醒', message)
             }
         } catch (error) {
+            console.log(`[checkAndNotify] 到期提醒发送失败: ${error instanceof Error ? error.message : String(error)}`)
         }
+    }
+    if (offlineDomains.length === 0 && expiringDomains.length === 0) {
+        console.log('[checkAndNotify] 本次检查无需发送通知')
     }
     persistDb()
     return { total: results.length, notified: offlineDomains.length + expiringDomains.length }
