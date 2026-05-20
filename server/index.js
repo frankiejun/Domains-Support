@@ -214,11 +214,31 @@ const calculateRemainingDays = (expiryDate) => {
 }
 
 const checkDomainStatus = async (domain) => {
+    const MAX_ATTEMPTS = 3
+    const TIMEOUT_MS = 15000
+
+    const isTransientNetworkError = (error) => {
+        if (!error) return false
+        const name = error.name || ''
+        const code = error.code || ''
+        // 超时
+        if (name === 'AbortError') return true
+        // DNS 解析失败（临时性）
+        if (['ENOTFOUND', 'EAI_AGAIN', 'EAI_FAIL', 'EAI_NODATA'].includes(code)) return true
+        // 连接异常
+        if (['ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ETIMEDOUT', 'EPIPE'].includes(code)) return true
+        // TLS 握手问题（Cloudflare CDN 和非常见 TLD 常见）
+        if (['ERR_TLS_CERT_ALTNAME_INVALID', 'ERR_TLS_CERT_ALTNAME_MISMATCH', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(code)) return true
+        const message = (error.message || '').toLowerCase()
+        if (message.includes('certificate') || message.includes('tls') || message.includes('handshake')) return true
+        return false
+    }
+
     const tryFetch = async (protocol) => {
-        for (let attempt = 1; attempt <= 2; attempt++) {
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
                 const controller = new AbortController()
-                const timeoutId = setTimeout(() => controller.abort(), 10000)
+                const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS)
                 const targetUrl = `${protocol}://${domain}`
                 const response = await fetch(targetUrl, {
                     method: 'GET',
@@ -230,21 +250,26 @@ const checkDomainStatus = async (domain) => {
                     }
                 })
                 clearTimeout(timeoutId)
-                if (response.ok) {
-                    return true
-                }
+                // 能拿到任何 HTTP 响应就说明服务器可达（不只看 2xx）
+                return true
             } catch (error) {
-                if (error && error.name === 'AbortError') {
+                if (isTransientNetworkError(error)) {
                     continue
                 }
+                return false
             }
         }
         return false
     }
+
     if (await tryFetch('https')) {
         return true
     }
-    return await tryFetch('http')
+    if (await tryFetch('http')) {
+        return true
+    }
+
+    return false
 }
 
 const execCommand = (command, options = {}) => new Promise((resolve, reject) => {
@@ -894,7 +919,7 @@ const checkAllDomains = async () => {
     if (domainList.length === 0) {
         return []
     }
-    const updatedDomains = await runWithConcurrency(domainList, 10, async (domain) => {
+    const updatedDomains = await runWithConcurrency(domainList, 5, async (domain) => {
         const isOnline = await checkDomainStatus(domain.domain)
         const status = isOnline ? '在线' : '离线'
         run('UPDATE domains SET status = ? WHERE id = ?', [status, domain.id])
@@ -918,7 +943,7 @@ const checkAndNotifyDomains = async () => {
         return { total: 0, notified: 0 }
     }
     console.log(`[checkAndNotify] 共有 ${domains.length} 个域名需要检查`)
-    const results = await runWithConcurrency(domains, 10, async (domain) => {
+    const results = await runWithConcurrency(domains, 5, async (domain) => {
         const remainingDays = calculateRemainingDays(domain.expiry_date)
         const isOnline = await checkDomainStatus(domain.domain)
         const status = isOnline ? '在线' : '离线'
