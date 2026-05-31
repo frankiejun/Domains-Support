@@ -143,11 +143,11 @@ bash ds.sh uninstall
    CERTBOT_CERTS_CMD=certbot certificates
    CERTBOT_TIMEOUT_MS=120000
 
-   # ACME 服务器（默认 Let's Encrypt，可切换 ZeroSSL）
-   ACME_SERVER=https://acme-v02.api.letsencrypt.org/directory
-   # ACME_SERVER=https://acme.zerossl.com/v2/DV90
-   # ACME_EAB_KID=your_eab_kid
-   # ACME_EAB_HMAC_KEY=your_eab_hmac_key
+   # ACME 服务器（推荐 ZeroSSL）
+   #ACME_SERVER=https://acme-v02.api.letsencrypt.org/directory
+   ACME_SERVER=https://acme.zerossl.com/v2/DV90
+   ACME_EAB_KID=your_eab_kid
+   ACME_EAB_HMAC_KEY=your_eab_hmac_key
 
    # Nginx 配置管理
    NGINX_SITES_DIR=/etc/nginx/conf.d
