@@ -14,7 +14,7 @@
             </el-form-item>
             <el-form-item label="注册日期" prop="registrar_date">
                 <el-date-picker v-model="form.registrar_date" type="date" placeholder="选择注册日期" value-format="YYYY-MM-DD"
-                    id="registrar-date-input" autocomplete="off" clearable />
+                    :shortcuts="registrarDateShortcuts" id="registrar-date-input" autocomplete="off" clearable />
             </el-form-item>
             <el-form-item label="到期日期" prop="expiry_date">
                 <el-date-picker v-model="form.expiry_date" type="date" placeholder="选择到期日期" value-format="YYYY-MM-DD"
@@ -111,6 +111,13 @@ const dialogVisible = ref(props.visible)
 const formRef = ref<FormInstance>()
 const websites = computed(() => props.websites || [])
 const cfAccounts = computed(() => props.cfAccounts || [])
+
+const registrarDateShortcuts = [
+    {
+        text: '今天',
+        value: () => new Date()
+    }
+]
 
 const parseBaseDate = (baseDate: string) => {
     const parsed = new Date(baseDate)

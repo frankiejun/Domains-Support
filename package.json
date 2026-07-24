@@ -1,7 +1,7 @@
 {
   "name": "domains-support",
   "private": true,
-  "version": "v1.3.2-vps-beta",
+  "version": "v1.3.3-vps-beta",
   "type": "module",
   "scripts": {
     "dev": "vite",
