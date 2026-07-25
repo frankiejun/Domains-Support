@@ -28,6 +28,10 @@ let certQueueTimer = null
 let certQueueProcessing = false
 const certQueue = []
 const certQueueSet = new Set()
+let certQueueBlockedSince = null
+let certQueueBlockedNotified = false
+const CERT_QUEUE_BLOCKED_STATUS = '等待中(certbot占用)'
+const CERT_QUEUE_BLOCKED_THRESHOLD_MS = 10 * 60 * 1000
 const certStatusSubscribers = new Set()
 let dbLastMtimeMs = 0
 
@@ -678,7 +682,27 @@ const enqueueCertRequest = (domain, siteId, options = {}) => {
 const processCertQueue = async () => {
     if (certQueueProcessing) return
     if (certQueue.length === 0) return
-    if (await isCertbotRunning()) return
+    if (await isCertbotRunning()) {
+        if (!certQueueBlockedSince) {
+            certQueueBlockedSince = Date.now()
+            appendLog('certbot', `queue blocked: another certbot instance is running (${certQueue.length} pending)`)
+        } else if (!certQueueBlockedNotified && Date.now() - certQueueBlockedSince > CERT_QUEUE_BLOCKED_THRESHOLD_MS) {
+            certQueueBlockedNotified = true
+            appendLog('certbot', `queue blocked over ${Math.round(CERT_QUEUE_BLOCKED_THRESHOLD_MS / 60000)} minutes, marking pending domains`)
+            for (const item of certQueue) {
+                updateCertStatus(item.domain, CERT_QUEUE_BLOCKED_STATUS)
+            }
+        }
+        return
+    }
+    if (certQueueBlockedSince) {
+        appendLog('certbot', `queue unblocked after ${Math.round((Date.now() - certQueueBlockedSince) / 1000)}s`)
+        certQueueBlockedSince = null
+        certQueueBlockedNotified = false
+        for (const item of certQueue) {
+            updateCertStatus(item.domain, '申请中')
+        }
+    }
     const task = certQueue.shift()
     if (!task) return
     certQueueSet.delete(task.domain)
@@ -721,7 +745,7 @@ const processCertQueue = async () => {
 const initCertQueue = () => {
     const rows = readRows(`SELECT domain, site_id FROM domains
         WHERE service_type = '伪装网站'
-        AND cert_status = '申请中'
+        AND cert_status IN ('申请中', '${CERT_QUEUE_BLOCKED_STATUS}')
         AND site_id IS NOT NULL`)
     for (const row of rows) {
         enqueueCertRequest(row.domain, row.site_id)
@@ -1343,6 +1367,27 @@ const startServer = async () => {
             return res.json({ status: 200, message: '检查完成', data: updatedDomains })
         } catch (error) {
             return res.status(500).json({ status: 500, message: error instanceof Error ? error.message : '检查失败', data: null })
+        }
+    })
+
+    app.post('/api/domains/:id/cert-apply', (req, res) => {
+        try {
+            const existing = readRow('SELECT * FROM domains WHERE id = ?', [req.params.id])
+            if (!existing) {
+                return res.status(404).json({ status: 404, message: '域名不存在', data: null })
+            }
+            if (existing.service_type !== '伪装网站' || !existing.site_id) {
+                return res.status(400).json({ status: 400, message: '仅伪装网站类型的域名可申请证书', data: null })
+            }
+            if (certQueueSet.has(existing.domain)) {
+                return res.json({ status: 200, message: '该域名已在申请队列中', data: null })
+            }
+            appendLog('certbot', `manual re-apply ${existing.domain} site ${existing.site_id}`)
+            enqueueCertRequest(existing.domain, existing.site_id)
+            runAsyncTask(`cert apply ${existing.domain}`, processCertQueue)
+            return res.json({ status: 200, message: '已加入证书申请队列', data: null })
+        } catch (error) {
+            return res.status(500).json({ status: 500, message: error instanceof Error ? error.message : '申请失败', data: null })
         }
     })
 

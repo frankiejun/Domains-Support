@@ -110,11 +110,14 @@
                 <template #default="scope">
                     <span :class="{
                         'success-text': scope.row.cert_status === '成功',
-                        'warning-text': scope.row.cert_status === '申请中' || scope.row.cert_status === '未设置DNS',
+                        'warning-text': scope.row.cert_status === '申请中' || scope.row.cert_status === '未设置DNS' || scope.row.cert_status === '等待中(certbot占用)',
                         'danger-text': scope.row.cert_status === '失败'
                     }">
                         {{ scope.row.cert_status || '无' }}
                     </span>
+                    <el-tooltip v-if="canApplyCert(scope.row)" content="重新申请证书" placement="top">
+                        <el-button link type="primary" :icon="Refresh" @click="handleApplyCert(scope.row)" />
+                    </el-tooltip>
                 </template>
             </el-table-column>
             <el-table-column prop="status" label="状态" align="center" sortable>
@@ -185,7 +188,7 @@ import { ArrowDown, CopyDocument, Delete, Download, Edit, Moon, Plus, Refresh, S
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { createDomain, deleteDomain, updateDomain, type DomainData } from '../api/domains'
+import { applyCert, createDomain, deleteDomain, updateDomain, type DomainData } from '../api/domains'
 import AlertConfigDialog from '../components/AlertConfigDialog.vue'
 import DomainDialog from '../components/DomainDialog.vue'
 import ImportDialog from '../components/ImportDialog.vue'
@@ -458,6 +461,22 @@ const handleDelete = async (row: Domain) => {
         if (error !== 'cancel') {
             ElMessage.error('删除失败')
         }
+    }
+}
+
+const canApplyCert = (row: Domain) => {
+    return row.service_type === '伪装网站' && !!row.site_id
+        && row.cert_status !== '申请中' && row.cert_status !== '等待中(certbot占用)'
+}
+
+const handleApplyCert = async (row: Domain) => {
+    if (!row.id) return
+    try {
+        const response = await applyCert(row.id)
+        ElMessage.success(response.data.message || '已加入证书申请队列')
+        await loadDomains(false)
+    } catch (error) {
+        console.error('申请证书失败:', error)
     }
 }
 

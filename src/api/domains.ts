@@ -9,7 +9,7 @@ export interface DomainData {
     expiry_date: string
     service_type: string
     status: string
-    cert_status?: '申请中' | '成功' | '失败' | '无'
+    cert_status?: '申请中' | '成功' | '失败' | '无' | '未设置DNS' | '等待中(certbot占用)'
     cert_retry_count?: number
     cert_retry_at?: string | null
     tgsend: number
@@ -45,4 +45,9 @@ export const updateDomain = (id: number, data: Omit<DomainData, 'id' | 'created_
 // 删除域名
 export const deleteDomain = (id: number) => {
     return request.delete<ApiResponse<void>>(`/api/domains/${id}`)
+}
+
+// 重新申请证书
+export const applyCert = (id: number) => {
+    return request.post<ApiResponse<void>>(`/api/domains/${id}/cert-apply`)
 } 
