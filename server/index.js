@@ -421,7 +421,11 @@ const writeNginxConfig = async (domain, filename) => {
     const reloadCmd = process.env.NGINX_RELOAD_CMD
     if (reloadCmd) {
         appendLog('nginx', `reload command ${reloadCmd}`)
-        await execCommand(reloadCmd)
+        try {
+            await execCommand(reloadCmd)
+        } catch (error) {
+            appendLog('nginx', `reload failed for ${domain}: ${error instanceof Error ? error.message : String(error)}`)
+        }
     } else {
         appendLog('nginx', 'reload skipped: NGINX_RELOAD_CMD not set')
     }
@@ -441,7 +445,11 @@ const removeNginxConfig = async (domain) => {
     const reloadCmd = process.env.NGINX_RELOAD_CMD
     if (reloadCmd) {
         appendLog('nginx', `reload command ${reloadCmd}`)
-        await execCommand(reloadCmd)
+        try {
+            await execCommand(reloadCmd)
+        } catch (error) {
+            appendLog('nginx', `reload failed for ${domain}: ${error instanceof Error ? error.message : String(error)}`)
+        }
     } else {
         appendLog('nginx', 'reload skipped: NGINX_RELOAD_CMD not set')
     }
