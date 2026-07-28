@@ -157,7 +157,7 @@
         <footer class="footer">
             <div class="footer-content">
                 <div class="copyright">
-                    <span>© 2026 Domains-Support v1.3.3-vps-beta</span>
+                    <span>© 2026 Domains-Support v1.3.4-vps-beta</span>
                     <span class="separator">|</span>
                     <span>作者：饭奇骏</span>
                     <span class="separator">|</span>
