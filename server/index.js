@@ -607,18 +607,12 @@ const cfRequest = async (token, url, options = {}, email) => {
         }
         return data
     }
+    // 先尝试 Bearer Token 认证（API Token 场景）
     try {
         return await send(false)
     } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        const shouldFallback = [
-            'Invalid request headers',
-            'Unable to authenticate request',
-            'Invalid API token',
-            'Invalid API key',
-            'Authentication error'
-        ].some((text) => message.includes(text))
-        if (email && shouldFallback) {
+        // 失败后，若有 email 则回退到 Global API Key 认证
+        if (email) {
             return await send(true)
         }
         throw error
@@ -748,13 +742,13 @@ const processCertQueue = async () => {
         if (!dnsOk) {
             if (domainRow?.cf_hosted === 1) {
                 updateCertStatus(task.domain, DNS_WAIT_STATUS, { retryAt: null, retryCount: 0 })
-                appendLog('certbot', `skip for ${task.domain}: dns not yet propagated, will retry`)
+                appendLog('certbot', `skip for ${task.domain}: dns not yet propagated (cf_hosted=1, needs cf re-apply)`)
             } else {
                 updateCertStatus(task.domain, '未设置DNS', { retryAt: null, retryCount: 0 })
                 appendLog('certbot', `skip for ${task.domain}: dns not pointing to server`)
-            }
-            if (task.siteId) {
-                enqueueCertRequest(task.domain, task.siteId, { setStatus: false })
+                if (task.siteId) {
+                    enqueueCertRequest(task.domain, task.siteId, { setStatus: false })
+                }
             }
             return
         }
@@ -1438,7 +1432,10 @@ const startServer = async () => {
                         await bindCfDnsRecords(existing.domain, existing.cf_account_id)
                         await waitForDnsPropagation(existing.domain)
                     } catch (error) {
-                        appendLog('certbot', `cf re-bind failed for ${existing.domain}: ${error instanceof Error ? error.message : String(error)}`)
+                        const errMsg = error instanceof Error ? error.message : String(error)
+                        appendLog('certbot', `cf re-bind failed for ${existing.domain}: ${errMsg}`)
+                        updateCertStatus(existing.domain, '失败', { retryAt: null, retryCount: 0 })
+                        return
                     } finally {
                         dnsWaitSet.delete(existing.domain)
                     }
