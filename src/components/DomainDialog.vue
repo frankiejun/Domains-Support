@@ -45,7 +45,12 @@
             </el-form-item>
             <el-form-item v-if="form.service_type === '伪装网站'">
                 <div class="site-hint">
-                    域名 DNS 需要添加本服务器的 A 记录，当前服务器 IP：{{ serverIp || '未获取' }}
+                    <template v-if="form.cf_hosted === 1">
+                        开启托管CF后，将自动设置DNS A/AAAA记录指向本服务器（{{ serverIp || '未获取' }}），并等待DNS生效后再申请证书
+                    </template>
+                    <template v-else>
+                        域名 DNS 需要添加本服务器的 A 记录，当前服务器 IP：{{ serverIp || '未获取' }}
+                    </template>
                 </div>
             </el-form-item>
             <el-form-item label="状态" prop="status">

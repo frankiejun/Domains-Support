@@ -110,7 +110,7 @@
                 <template #default="scope">
                     <span :class="{
                         'success-text': scope.row.cert_status === '成功',
-                        'warning-text': scope.row.cert_status === '申请中' || scope.row.cert_status === '未设置DNS' || scope.row.cert_status === '等待中(certbot占用)',
+                        'warning-text': scope.row.cert_status === '申请中' || scope.row.cert_status === '未设置DNS' || scope.row.cert_status === '等待DNS生效' || scope.row.cert_status === '等待中(certbot占用)',
                         'danger-text': scope.row.cert_status === '失败'
                     }">
                         {{ scope.row.cert_status || '无' }}
@@ -466,7 +466,7 @@ const handleDelete = async (row: Domain) => {
 
 const canApplyCert = (row: Domain) => {
     return row.service_type === '伪装网站' && !!row.site_id
-        && row.cert_status !== '申请中' && row.cert_status !== '等待中(certbot占用)'
+        && row.cert_status !== '申请中' && row.cert_status !== '等待中(certbot占用)' && row.cert_status !== '等待DNS生效'
 }
 
 const handleApplyCert = async (row: Domain) => {

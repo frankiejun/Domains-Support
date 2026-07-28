@@ -35,6 +35,15 @@ const CERT_QUEUE_BLOCKED_THRESHOLD_MS = 10 * 60 * 1000
 const certStatusSubscribers = new Set()
 let dbLastMtimeMs = 0
 
+const DNS_WAIT_STATUS = '等待DNS生效'
+const dnsWaitSet = new Set()
+
+const publicDnsResolver = new dns.Resolver()
+try {
+    publicDnsResolver.setServers(['1.1.1.1', '8.8.8.8'])
+} catch {
+}
+
 const ensureDir = () => {
     const dir = path.dirname(dbFilePath)
     if (!fs.existsSync(dir)) {
@@ -493,33 +502,52 @@ const listCertbotDomains = async () => {
     }
 }
 
-const resolveDomainIps = async (domain) => {
+const resolveDomainIps = async (domain, usePublicDns = false) => {
+    const resolver = usePublicDns ? publicDnsResolver : dns
     const ipv4 = []
     const ipv6 = []
     try {
-        const records4 = await dns.resolve4(domain)
+        const records4 = await resolver.resolve4(domain)
         ipv4.push(...records4)
     } catch {
     }
     try {
-        const records6 = await dns.resolve6(domain)
+        const records6 = await resolver.resolve6(domain)
         ipv6.push(...records6)
     } catch {
     }
     return { ipv4, ipv6 }
 }
 
-const isDnsPointingToServer = async (domain) => {
+const isDnsPointingToServer = async (domain, usePublicDns = false) => {
     const { ipv4Public, ipv6Global } = getServerIpCandidates()
     if (ipv4Public.length === 0 && ipv6Global.length === 0) {
         return true
     }
     const serverIpv4 = new Set(ipv4Public)
     const serverIpv6 = new Set(ipv6Global.map((ip) => normalizeIp(ip)))
-    const { ipv4, ipv6 } = await resolveDomainIps(domain)
+    const { ipv4, ipv6 } = await resolveDomainIps(domain, usePublicDns)
     const matchIpv4 = ipv4.some((ip) => serverIpv4.has(ip))
     const matchIpv6 = ipv6.some((ip) => serverIpv6.has(normalizeIp(ip)))
     return matchIpv4 || matchIpv6
+}
+
+const waitForDnsPropagation = async (domain) => {
+    const maxAttempts = Number(process.env.DNS_PROPAGATION_MAX_ATTEMPTS || 30)
+    const intervalMs = Number(process.env.DNS_PROPAGATION_INTERVAL_MS || 10000)
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const dnsOk = await isDnsPointingToServer(domain, true)
+        if (dnsOk) {
+            appendLog('dns', `${domain} propagation ok after ${attempt} check(s)`)
+            return true
+        }
+        if (attempt < maxAttempts) {
+            appendLog('dns', `${domain} propagation wait ${attempt}/${maxAttempts}`)
+            await new Promise((resolve) => setTimeout(resolve, intervalMs))
+        }
+    }
+    appendLog('dns', `${domain} propagation timeout after ${maxAttempts} check(s)`)
+    return false
 }
 
 const normalizeDomain = (value) => (value || '').trim().toLowerCase()
@@ -718,9 +746,14 @@ const processCertQueue = async () => {
         await writeNginxConfig(task.domain, site.filename)
         const dnsOk = await isDnsPointingToServer(task.domain)
         if (!dnsOk) {
-            updateCertStatus(task.domain, '未设置DNS', { retryAt: null, retryCount: 0 })
-            appendLog('certbot', `skip for ${task.domain}: dns not pointing to server`)
-            if (domainRow?.cf_hosted === 1 && task.siteId) {
+            if (domainRow?.cf_hosted === 1) {
+                updateCertStatus(task.domain, DNS_WAIT_STATUS, { retryAt: null, retryCount: 0 })
+                appendLog('certbot', `skip for ${task.domain}: dns not yet propagated, will retry`)
+            } else {
+                updateCertStatus(task.domain, '未设置DNS', { retryAt: null, retryCount: 0 })
+                appendLog('certbot', `skip for ${task.domain}: dns not pointing to server`)
+            }
+            if (task.siteId) {
                 enqueueCertRequest(task.domain, task.siteId, { setStatus: false })
             }
             return
@@ -745,7 +778,7 @@ const processCertQueue = async () => {
 const initCertQueue = () => {
     const rows = readRows(`SELECT domain, site_id FROM domains
         WHERE service_type = '伪装网站'
-        AND cert_status IN ('申请中', '${CERT_QUEUE_BLOCKED_STATUS}')
+        AND cert_status IN ('申请中', '${CERT_QUEUE_BLOCKED_STATUS}', '${DNS_WAIT_STATUS}')
         AND site_id IS NOT NULL`)
     for (const row of rows) {
         enqueueCertRequest(row.domain, row.site_id)
@@ -1194,7 +1227,14 @@ const startServer = async () => {
                 runAsyncTask(`apply binding ${data.domain}`, async () => {
                     try {
                         if (Number(data.cf_hosted) === 1 && data.cf_account_id) {
-                            await bindCfDnsRecords(data.domain, data.cf_account_id)
+                            updateCertStatus(data.domain, DNS_WAIT_STATUS, { retryAt: null, retryCount: 0 })
+                            dnsWaitSet.add(data.domain)
+                            try {
+                                await bindCfDnsRecords(data.domain, data.cf_account_id)
+                                await waitForDnsPropagation(data.domain)
+                            } finally {
+                                dnsWaitSet.delete(data.domain)
+                            }
                         }
                         applyWebsiteBinding(data.domain, data.site_id)
                     } catch (error) {
@@ -1296,7 +1336,14 @@ const startServer = async () => {
                 runAsyncTask(`apply binding ${data.domain}`, async () => {
                     try {
                         if (cfHostedValue === 1 && cfAccountIdValue) {
-                            await bindCfDnsRecords(data.domain, cfAccountIdValue)
+                            updateCertStatus(data.domain, DNS_WAIT_STATUS, { retryAt: null, retryCount: 0 })
+                            dnsWaitSet.add(data.domain)
+                            try {
+                                await bindCfDnsRecords(data.domain, cfAccountIdValue)
+                                await waitForDnsPropagation(data.domain)
+                            } finally {
+                                dnsWaitSet.delete(data.domain)
+                            }
                         }
                         applyWebsiteBinding(data.domain, data.site_id)
                     } catch (error) {
@@ -1379,10 +1426,27 @@ const startServer = async () => {
             if (existing.service_type !== '伪装网站' || !existing.site_id) {
                 return res.status(400).json({ status: 400, message: '仅伪装网站类型的域名可申请证书', data: null })
             }
-            if (certQueueSet.has(existing.domain)) {
-                return res.json({ status: 200, message: '该域名已在申请队列中', data: null })
+            if (certQueueSet.has(existing.domain) || dnsWaitSet.has(existing.domain)) {
+                return res.json({ status: 200, message: '该域名已在处理中', data: null })
             }
             appendLog('certbot', `manual re-apply ${existing.domain} site ${existing.site_id}`)
+            if (existing.cf_hosted === 1 && existing.cf_account_id) {
+                updateCertStatus(existing.domain, DNS_WAIT_STATUS, { retryAt: null, retryCount: 0 })
+                runAsyncTask(`cf rebind ${existing.domain}`, async () => {
+                    dnsWaitSet.add(existing.domain)
+                    try {
+                        await bindCfDnsRecords(existing.domain, existing.cf_account_id)
+                        await waitForDnsPropagation(existing.domain)
+                    } catch (error) {
+                        appendLog('certbot', `cf re-bind failed for ${existing.domain}: ${error instanceof Error ? error.message : String(error)}`)
+                    } finally {
+                        dnsWaitSet.delete(existing.domain)
+                    }
+                    enqueueCertRequest(existing.domain, existing.site_id)
+                    runAsyncTask(`cert apply ${existing.domain}`, processCertQueue)
+                })
+                return res.json({ status: 200, message: '正在设置DNS并等待生效，随后申请证书', data: null })
+            }
             enqueueCertRequest(existing.domain, existing.site_id)
             runAsyncTask(`cert apply ${existing.domain}`, processCertQueue)
             return res.json({ status: 200, message: '已加入证书申请队列', data: null })

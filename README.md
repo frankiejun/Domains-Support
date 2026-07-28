@@ -232,20 +232,33 @@ bash ds.sh uninstall
 | `NGINX_RELOAD_CMD` | - | Nginx reload 命令（如 `systemctl reload nginx`） |
 | `WEBSITES_DIR` | `websites/` | 伪装网站 HTML 文件目录 |
 
+### DNS 生效检测配置
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DNS_PROPAGATION_MAX_ATTEMPTS` | `30` | DNS 生效检测最大尝试次数 |
+| `DNS_PROPAGATION_INTERVAL_MS` | `10000` | DNS 生效检测轮询间隔（毫秒） |
+
+> 默认最长等待 5 分钟（30 次 × 10 秒），通过公共 DNS（1.1.1.1 / 8.8.8.8）检测。
+
 ## 证书申请工作流程
 
 将域名设为"伪装网站"并绑定网站模板后，系统自动执行：
 
 ```
-1. 写入 Nginx 配置（监听 80 端口，指向伪装网站）
-2. 检查 DNS 是否指向本服务器
-3. 检查证书是否已存在（含通配符证书匹配）
-4. 调用 Certbot 申请证书（HTTP-01 验证）
-5. 证书申请成功后更新状态
-6. 下次 Nginx reload 时自动加载 SSL 配置
+1. （若开启托管CF）通过 Cloudflare API 自动设置 DNS A/AAAA 记录指向本服务器
+2. （若开启托管CF）等待 DNS 记录生效（通过公共 DNS 轮询检测，默认最长 5 分钟）
+3. 写入 Nginx 配置（监听 80 端口，指向伪装网站）
+4. 检查 DNS 是否指向本服务器
+5. 检查证书是否已存在（含通配符证书匹配）
+6. 调用 Certbot 申请证书（HTTP-01 验证）
+7. 证书申请成功后更新状态
+8. 下次 Nginx reload 时自动加载 SSL 配置
 ```
 
 证书申请通过队列机制串行处理，每 60 秒检查一次队列，避免并发触发 rate limit。
+
+> **说明**：开启"托管CF"后，DNS 记录由程序自动设置并等待生效，无需手动添加 A 记录。DNS 生效过程中证书状态显示为"等待DNS生效"。未开启"托管CF"时，需手动添加 A 记录指向本服务器 IP。
 
 > **注意**：证书的自动续约由系统 certbot timer 负责，本项目只处理首次申请。请确保 `certbot.timer` 已启用，并配置了 deploy hook 以在续约后 reload nginx。
 
