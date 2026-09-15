@@ -397,12 +397,6 @@ EOF
 
 本项目基于 MIT 许可证开源 - 查看 [LICENSE](LICENSE) 文件了解更多详情。
 
-## 赞助
-
-| 赞助人 | 赞助方式 | 备注 |
-| ------ | -------- | ---- |
-| [ZMTO](https://www.zmto.com/) | 免费提供服务器 | - |
-
 ## 作者
 
 饭奇骏 ([@frankiejun](https://github.com/frankiejun))
